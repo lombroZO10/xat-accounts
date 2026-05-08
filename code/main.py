@@ -348,7 +348,9 @@ class XATAccountGenerator:
                     if resposta.status_code in [403, 503] or any(term in resposta.text.lower() for term in ['checking your browser', 'cloudflare', 'cf-challenge', 'cf-browser-verification']):
                         logger.warning(f"⚠️ Cloudflare ou bloqueio detectado na tentativa {tentativa + 1}/{max_tentativas} (status {resposta.status_code})")
                         if self.scraper:
-                            scraper_response = self._fazer_requisicao_com_cloudscraper(method, url, proxies=proxy, **kwargs)
+                            scraper_kwargs = {k: v for k, v in kwargs.items() if k != 'proxies'}
+                            scraper_kwargs['proxies'] = proxy
+                            scraper_response = self._fazer_requisicao_com_cloudscraper(method, url, **scraper_kwargs)
                             if scraper_response:
                                 return scraper_response
                         time.sleep(random.uniform(1, 3))
