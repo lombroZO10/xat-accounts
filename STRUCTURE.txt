@@ -1,0 +1,250 @@
+﻿â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
+
+ðŸ“‚ ESTRUTURA DO PROJETO - XAT ACCOUNT GENERATOR v1.0
+
+â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
+
+xat-accounts/
+â”‚
+â”œâ”€â”€ ðŸ“„ START_HERE.md                ðŸ‘ˆ COMECE AQUI!
+â”œâ”€â”€ ðŸ“„ README.md                    Guia principal
+â”œâ”€â”€ ðŸ“„ 00_LEIA_PRIMEIRO.txt         Leia primeiro
+â”‚
+â”œâ”€â”€ ðŸ“ code/                        CÃ³digo executÃ¡vel
+â”‚   â”œâ”€â”€ main.py                     Motor principal (509 linhas)
+â”‚   â”œâ”€â”€ setup.py                    Setup automÃ¡tico
+â”‚   â””â”€â”€ verify.py                   VerificaÃ§Ã£o de integridade
+â”‚
+â”œâ”€â”€ âš™ï¸  config/                     ConfiguraÃ§Ãµes
+â”‚   â”œâ”€â”€ config.json                 Settings customizÃ¡veis
+â”‚   â”œâ”€â”€ config/requirements.txt            DependÃªncias Python
+â”‚   â””â”€â”€ .gitignore                  ProteÃ§Ã£o de dados sensÃ­veis
+â”‚
+â”œâ”€â”€ ðŸ“š docs/                        DocumentaÃ§Ã£o (10 arquivos)
+â”‚   â”œâ”€â”€ EXAMPLES.md                 Exemplos prÃ¡ticos
+â”‚   â”œâ”€â”€ PROXIES_GUIDE.md            Como obter proxies
+â”‚   â”œâ”€â”€ ROADMAP.md                  Melhorias futuras
+â”‚   â”œâ”€â”€ CHECKLIST.md                Checklist de entrega
+â”‚   â”œâ”€â”€ STATISTICS.md               EstatÃ­sticas do projeto
+â”‚   â”œâ”€â”€ FINAL.md                    SumÃ¡rio final
+â”‚   â”œâ”€â”€ INDEX.md                    Mapa de navegaÃ§Ã£o
+â”‚   â”œâ”€â”€ FILES_CREATED.md            Lista de arquivos
+â”‚   â”œâ”€â”€ DELIVERY.txt                Entrega visual
+â”‚   â””â”€â”€ RESUMO.md                   Quick start
+â”‚
+â”œâ”€â”€ ðŸš€ scripts/                     Scripts auxiliares
+â”‚   â”œâ”€â”€ run.bat                     Launcher Windows (double-click)
+â”‚   â””â”€â”€ run.sh                      Launcher Linux/Mac (bash)
+â”‚
+â””â”€â”€ ðŸ“Š data/                        Dados de entrada/saÃ­da
+    â”œâ”€â”€ emails.txt                  Lista de emails (exemplo: 5)
+    â”œâ”€â”€ proxies.txt                 Template de proxies
+    â””â”€â”€ success_criacao.txt         Contas criadas (auto-gerado)
+
+â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
+
+ðŸŽ¯ ORGANIZAÃ‡ÃƒO POR TIPO
+
+ðŸ“ RAIZ - DocumentaÃ§Ã£o Principal
+   â””â”€ START_HERE.md (ðŸ‘ˆ COMECE AQUI)
+   â””â”€ README.md (Guia geral)
+   â””â”€ 00_LEIA_PRIMEIRO.txt (SumÃ¡rio visual)
+
+ðŸ“ code/ - CÃ³digo ExecutÃ¡vel
+   â””â”€ main.py (509 linhas - Motor)
+   â””â”€ setup.py (Setup automÃ¡tico)
+   â””â”€ verify.py (VerificaÃ§Ã£o)
+
+âš™ï¸  config/ - ConfiguraÃ§Ãµes
+   â””â”€ config.json (Delays, timeouts, etc)
+   â””â”€ config/requirements.txt (DependÃªncias)
+   â””â”€ .gitignore (SeguranÃ§a)
+
+ðŸ“š docs/ - DocumentaÃ§Ã£o Detalhada
+   â””â”€ 10 arquivos markdown
+   â””â”€ Exemplos, proxies, roadmap, etc
+
+ðŸš€ scripts/ - ExecutÃ¡veis Auxiliares
+   â””â”€ run.bat (Windows)
+   â””â”€ run.sh (Linux/Mac)
+
+ðŸ“Š data/ - Dados de Entrada/SaÃ­da
+   â””â”€ emails.txt (Entrada)
+   â””â”€ proxies.txt (Entrada)
+   â””â”€ success_criacao.txt (SaÃ­da)
+
+â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
+
+ðŸ“‹ COMO USAR CADA PASTA
+
+ðŸŽ¯ Para ComeÃ§ar:
+   1. Leia: START_HERE.md (na raiz)
+   2. Use: code/setup.py
+   3. Preencha: data/emails.txt + data/proxies.txt
+   4. Execute: scripts/run.bat (Windows) ou scripts/run.sh (Linux/Mac)
+
+ðŸŽ¯ Para Entender:
+   1. README.md (na raiz)
+   2. docs/EXAMPLES.md
+   3. docs/ROADMAP.md
+
+ðŸŽ¯ Para Configurar:
+   1. config/config.json
+   2. config/requirements.txt
+   3. code/setup.py
+
+ðŸŽ¯ Para Resolver Problemas:
+   1. code/verify.py
+   2. docs/EXAMPLES.md (Troubleshooting)
+   3. Ver logs em criacao_contas.log
+
+â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
+
+ðŸ“Š CONTEÃšDO DE CADA PASTA
+
+â”Œâ”€ RAIZ â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”
+â”‚                                                                    â”‚
+â”‚  âœ… START_HERE.md              ðŸ‘ˆ COMECE AQUI (5 min)            â”‚
+â”‚  âœ… README.md                  Guia completo (15 min)             â”‚
+â”‚  âœ… 00_LEIA_PRIMEIRO.txt       SumÃ¡rio visual                      â”‚
+â”‚  âœ… STRUCTURE.txt              Este arquivo                        â”‚
+â”‚                                                                    â”‚
+â”‚  PropÃ³sito: DocumentaÃ§Ã£o de entrada para o projeto                â”‚
+â”‚                                                                    â”‚
+â””â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”˜
+
+â”Œâ”€ code/ â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”
+â”‚                                                                    â”‚
+â”‚  âœ… main.py                    509 linhas - Motor principal        â”‚
+â”‚     â””â”€ Classe XATAccountGenerator com 20+ mÃ©todos                 â”‚
+â”‚     â””â”€ Proxy rotation, geraÃ§Ã£o credenciais, logging               â”‚
+â”‚                                                                    â”‚
+â”‚  âœ… setup.py                   45 linhas - Setup automÃ¡tico        â”‚
+â”‚     â””â”€ Cria diretÃ³rios, arquivos de exemplo                       â”‚
+â”‚                                                                    â”‚
+â”‚  âœ… verify.py                  150 linhas - VerificaÃ§Ã£o           â”‚
+â”‚     â””â”€ Valida integridade do projeto                              â”‚
+â”‚                                                                    â”‚
+â”‚  PropÃ³sito: CÃ³digo executÃ¡vel do projeto                          â”‚
+â”‚                                                                    â”‚
+â””â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”˜
+
+â”Œâ”€ config/ â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”
+â”‚                                                                    â”‚
+â”‚  âœ… config.json                ConfiguraÃ§Ãµes customizÃ¡veis        â”‚
+â”‚     â””â”€ Delays, timeouts, retry, username/senha                   â”‚
+â”‚                                                                    â”‚
+â”‚  âœ… config/requirements.txt           DependÃªncias Python                â”‚
+â”‚     â””â”€ requests, beautifulsoup4, urllib3                          â”‚
+â”‚                                                                    â”‚
+â”‚  âœ… .gitignore                 ProteÃ§Ã£o de dados sensÃ­veis        â”‚
+â”‚     â””â”€ Ignora logs, success_criacao.txt, venv, etc                â”‚
+â”‚                                                                    â”‚
+â”‚  PropÃ³sito: ConfiguraÃ§Ãµes e dependÃªncias                          â”‚
+â”‚                                                                    â”‚
+â””â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”˜
+
+â”Œâ”€ docs/ â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”
+â”‚                                                                    â”‚
+â”‚  âœ… EXAMPLES.md                Exemplos prÃ¡ticos + troubleshoot   â”‚
+â”‚  âœ… PROXIES_GUIDE.md           Como obter e usar proxies          â”‚
+â”‚  âœ… ROADMAP.md                 Melhorias futuras (Phase 2-4)      â”‚
+â”‚  âœ… CHECKLIST.md               Tudo que foi entregue              â”‚
+â”‚  âœ… STATISTICS.md              EstatÃ­sticas do projeto            â”‚
+â”‚  âœ… FINAL.md                   SumÃ¡rio executivo                  â”‚
+â”‚  âœ… INDEX.md                   Mapa de navegaÃ§Ã£o                  â”‚
+â”‚  âœ… FILES_CREATED.md           Lista detalhada de arquivos        â”‚
+â”‚  âœ… DELIVERY.txt               Entrega visual                     â”‚
+â”‚  âœ… RESUMO.md                  Quick start + dicas                â”‚
+â”‚                                                                    â”‚
+â”‚  PropÃ³sito: DocumentaÃ§Ã£o tÃ©cnica e de ajuda                       â”‚
+â”‚                                                                    â”‚
+â””â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”˜
+
+â”Œâ”€ scripts/ â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”
+â”‚                                                                    â”‚
+â”‚  âœ… run.bat                    Launcher para Windows              â”‚
+â”‚     â””â”€ Double-click para executar tudo automaticamente            â”‚
+â”‚                                                                    â”‚
+â”‚  âœ… run.sh                     Launcher para Linux/Mac            â”‚
+â”‚     â””â”€ bash run.sh para executar tudo automaticamente             â”‚
+â”‚                                                                    â”‚
+â”‚  PropÃ³sito: Scripts auxiliares de execuÃ§Ã£o                        â”‚
+â”‚                                                                    â”‚
+â””â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”˜
+
+â”Œâ”€ data/ â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”
+â”‚                                                                    â”‚
+â”‚  âœ… emails.txt                 Lista de emails (um por linha)     â”‚
+â”‚     â””â”€ Exemplo: usuario1@gmail.com                                â”‚
+â”‚                                                                    â”‚
+â”‚  âœ… proxies.txt                Template de proxies                â”‚
+â”‚     â””â”€ Formato: ip:porta ou ip:porta:user:pass                    â”‚
+â”‚                                                                    â”‚
+â”‚  âœ… success_criacao.txt        Contas criadas com sucesso         â”‚
+â”‚     â””â”€ Gerado automaticamente pelo script                         â”‚
+â”‚     â””â”€ Formato: username|senha|email|userid|timestamp|status     â”‚
+â”‚                                                                    â”‚
+â”‚  PropÃ³sito: Dados de entrada e saÃ­da                              â”‚
+â”‚                                                                    â”‚
+â””â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”˜
+
+â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
+
+ðŸš€ FLUXO DE USO RECOMENDADO
+
+1ï¸âƒ£  COMEÃ‡AR
+    â””â”€ Leia: START_HERE.md (na raiz)
+
+2ï¸âƒ£  SETUP
+    â””â”€ Execute: python code/setup.py
+
+3ï¸âƒ£  DADOS
+    â””â”€ Preencha: data/emails.txt
+    â””â”€ Preencha: data/proxies.txt
+
+4ï¸âƒ£  INSTALAR
+    â””â”€ Execute: pip install -r config/requirements.txt
+
+5ï¸âƒ£  CONFIGURAR
+    â””â”€ Edite: config/config.json (se necessÃ¡rio)
+
+6ï¸âƒ£  EXECUTAR
+    â””â”€ Windows: scripts/run.bat (ou python code/main.py)
+    â””â”€ Linux/Mac: bash scripts/run.sh (ou python code/main.py)
+
+7ï¸âƒ£  MONITORAR
+    â””â”€ Ver: criacao_contas.log (gerado durante execuÃ§Ã£o)
+
+8ï¸âƒ£  RESULTADOS
+    â””â”€ Coletar: data/success_criacao.txt
+
+â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
+
+ðŸ“Š TAMANHO E CONTEÃšDO
+
+Pasta        | Arquivos | Tamanho | DescriÃ§Ã£o
+â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”¼â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”¼â”€â”€â”€â”€â”€â”€â”€â”€â”€â”¼â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+Raiz         | 3        | 20 KB   | DocumentaÃ§Ã£o principal
+code/        | 3        | 25 KB   | CÃ³digo executÃ¡vel
+config/      | 3        | 2 KB    | ConfiguraÃ§Ãµes
+docs/        | 10       | 100 KB  | DocumentaÃ§Ã£o completa
+scripts/     | 2        | 2 KB    | Scripts auxiliares
+data/        | 3        | 1 KB    | Dados de exemplo
+â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”¼â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”¼â”€â”€â”€â”€â”€â”€â”€â”€â”€â”¼â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+TOTAL        | 24       | ~150 KB | Projeto completo
+
+â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
+
+ðŸŽ¯ RESUMO FINAL
+
+âœ… Bem organizado em 6 pastas lÃ³gicas
+âœ… Cada pasta tem responsabilidade clara
+âœ… FÃ¡cil navegar e encontrar arquivos
+âœ… Estrutura profissional
+âœ… Pronto para uso
+
+ðŸ‘‰ COMECE: Leia START_HERE.md (na raiz)
+
+â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
+

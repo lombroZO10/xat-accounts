@@ -1,0 +1,11 @@
+*.log
+data/success_criacao.txt
+__pycache__/
+*.pyc
+*.pyo
+venv/
+.venv/
+env/
+.env
+.DS_Store
+Thumbs.db

@@ -1,0 +1,36 @@
+{
+  "delays": {
+    "min_entre_requisicoes": 5,
+    "max_entre_requisicoes": 10,
+    "min_entre_contas": 10,
+    "max_entre_contas": 20,
+    "apos_429": 30
+  },
+  "timeout": {
+    "requisicao": 15,
+    "proxy": 10
+  },
+  "retry": {
+    "max_tentativas": 3,
+    "delay_entre_tentativas": 1
+  },
+  "username": {
+    "tamanho_min": 10,
+    "tamanho_max": 18
+  },
+  "senha": {
+    "tamanho_min": 8,
+    "tamanho_max": 16
+  },
+  "proxy": {
+    "rotacao": "por_requisicao",
+    "health_check": false,
+    "use_public_fallback": true,
+    "skip_for_endpoints": ["/web_gear/chat/auser3.php", "/login"]
+  },
+  "captcha_solver": {
+    "enabled": false,
+    "provider": "2captcha",
+    "api_key": ""
+  }
+}
