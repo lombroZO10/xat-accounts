@@ -26,7 +26,7 @@
     "rotacao": "por_requisicao",
     "health_check": false,
     "use_public_fallback": true,
-    "skip_for_endpoints": ["/web_gear/chat/auser3.php", "/login"]
+    "skip_for_endpoints": ["/login"]
   },
   "captcha_solver": {
     "enabled": false,

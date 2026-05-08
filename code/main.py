@@ -384,9 +384,13 @@ class XATAccountGenerator:
                     time.sleep(delay)
                     continue
 
-                if resposta.status_code in [403, 503]:
-                    logger.warning(f"⚠️ Bloqueio detectado (status {resposta.status_code}) na tentativa {tentativa + 1}/{max_tentativas}")
-                    time.sleep(random.uniform(2, 5))
+                if resposta.status_code in [403, 503] or any(term in resposta.text.lower() for term in ['checking your browser', 'cloudflare', 'cf-challenge', 'cf-browser-verification']):
+                    logger.warning(f"⚠️ Cloudflare ou bloqueio detectado na tentativa {tentativa + 1}/{max_tentativas} (status {resposta.status_code})")
+                    if self.scraper:
+                        scraper_response = self._fazer_requisicao_com_cloudscraper(method, url, **kwargs)
+                        if scraper_response:
+                            return scraper_response
+                    time.sleep(random.uniform(1, 3))
                     continue
 
                 resposta.raise_for_status()
@@ -449,6 +453,16 @@ class XATAccountGenerator:
                 logger.info(f"✅ UserID obtido via query string: {user_id}")
                 return user_id
 
+            # Tentar JSON
+            try:
+                json_data = resposta.json()
+                if 'UserId' in json_data:
+                    user_id = str(json_data['UserId'])
+                    logger.info(f"✅ UserID obtido via JSON: {user_id}")
+                    return user_id
+            except:
+                pass
+
             match = re.search(r'UserId["\']?\s*[:=]\s*["\']?(\d+)', resposta.text, re.IGNORECASE)
             if match:
                 user_id = match.group(1)
@@ -463,7 +477,7 @@ class XATAccountGenerator:
                 return user_id
             
             logger.error("❌ Não foi possível extrair UserID da resposta")
-            logger.debug(f"Resposta recebida: {resposta.text[:500]}")
+            logger.debug(f"Resposta recebida: {resposta.text[:1000]}")
             return None
         
         except Exception as e:
