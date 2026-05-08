@@ -477,7 +477,7 @@ class XATAccountGenerator:
                 return user_id
             
             logger.error("❌ Não foi possível extrair UserID da resposta")
-            logger.debug(f"Resposta recebida: {resposta.text[:1000]}")
+            logger.info(f"Resposta recebida (primeiros 1000 chars): {resposta.text[:1000]}")
             return None
         
         except Exception as e:
