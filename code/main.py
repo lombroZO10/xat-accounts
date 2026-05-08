@@ -130,7 +130,7 @@ class XATAccountGenerator:
         session.headers.update({
             'User-Agent': random.choice(self.USER_AGENTS),
             'Accept-Language': 'pt-BR,pt;q=0.9,en-US;q=0.8,en;q=0.7',
-            'Accept-Encoding': 'gzip, deflate, br',
+            'Accept-Encoding': 'gzip, deflate',
             'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8',
             'DNT': '1',
             'Connection': 'keep-alive',
@@ -151,6 +151,22 @@ class XATAccountGenerator:
         except Exception as e:
             logger.warning(f"⚠️ Não foi possível inicializar cloudscraper: {e}")
             return None
+
+    def _decodificar_resposta(self, resposta: requests.Response) -> str:
+        """Retorna texto decodificado mesmo quando a resposta vier comprimida em brotli."""
+        if not resposta:
+            return ''
+
+        content_encoding = resposta.headers.get('Content-Encoding', '').lower()
+        if 'br' in content_encoding:
+            try:
+                import brotli
+                return brotli.decompress(resposta.content).decode(resposta.encoding or 'utf-8', errors='replace')
+            except Exception as e:
+                logger.warning(f"⚠️ Falha ao decodificar brotli: {e}. Tentando fallback com decode direto.")
+                return resposta.content.decode(resposta.encoding or 'utf-8', errors='replace')
+
+        return resposta.text
     
     def carregar_emails(self) -> bool:
         """Carrega emails do arquivo emails.txt"""
@@ -446,8 +462,10 @@ class XATAccountGenerator:
                 logger.error("❌ Falha ao obter resposta de auser3.php")
                 return None
             
+            texto_resposta = self._decodificar_resposta(resposta)
+            
             # Extrair UserID da resposta como query string, JSON ou HTML
-            query_data = parse_qs(resposta.text.lstrip('&').strip())
+            query_data = parse_qs(texto_resposta.lstrip('&').strip())
             if query_data.get('UserId'):
                 user_id = query_data['UserId'][0]
                 logger.info(f"✅ UserID obtido via query string: {user_id}")
@@ -455,29 +473,29 @@ class XATAccountGenerator:
 
             # Tentar JSON
             try:
-                json_data = resposta.json()
+                json_data = json.loads(texto_resposta)
                 if 'UserId' in json_data:
                     user_id = str(json_data['UserId'])
                     logger.info(f"✅ UserID obtido via JSON: {user_id}")
                     return user_id
-            except:
+            except Exception:
                 pass
 
-            match = re.search(r'UserId["\']?\s*[:=]\s*["\']?(\d+)', resposta.text, re.IGNORECASE)
+            match = re.search(r'UserId["\']?\s*[:=]\s*["\']?(\d+)', texto_resposta, re.IGNORECASE)
             if match:
                 user_id = match.group(1)
                 logger.info(f"✅ UserID obtido: {user_id}")
                 return user_id
             
             # Tentar alternativa (procurar em tags ou variáveis)
-            match = re.search(r'(\d{5,})', resposta.text)
+            match = re.search(r'(\d{5,})', texto_resposta)
             if match:
                 user_id = match.group(1)
                 logger.info(f"✅ UserID extraído (alternativo): {user_id}")
                 return user_id
             
             logger.error("❌ Não foi possível extrair UserID da resposta")
-            logger.info(f"Resposta recebida (primeiros 1000 chars): {resposta.text[:1000]}")
+            logger.info(f"Resposta recebida (primeiros 1000 chars): {texto_resposta[:1000]}")
             return None
         
         except Exception as e:
