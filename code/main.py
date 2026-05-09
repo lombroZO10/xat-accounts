@@ -843,18 +843,18 @@ class XATAccountGenerator:
                 if sitekey:
                     logger.warning(f"⚠️ reCAPTCHA detectado para {email}. Sitekey encontrada: {sitekey}")
                 else:
-                    logger.warning("⚠️ Possível bloqueio ou resposta inválida contendo 'captcha', mas sem sitekey de reCAPTCHA")
+                    logger.warning("⚠️ reCAPTCHA detectado mas sem sitekey no retorno do register5.php")
+
+                if not sitekey and self.last_recaptcha_sitekey:
+                    sitekey = self.last_recaptcha_sitekey
+                    logger.info("ℹ️ Usando sitekey extraída da página de login para resolver o reCAPTCHA")
 
                 if not sitekey:
-                    logger.warning(f"⚠️ Não foi possível criar conta devido a bloqueio/recaptcha não resolvível para {email}")
+                    logger.warning(f"⚠️ Não foi possível criar conta devido a reCAPTCHA não resolvível para {email}")
                     logger.debug(f"Resposta suspeita de bloqueio: {texto_resposta[:500]}")
                     return False
 
                 if self.config['captcha_solver'].get('enabled', False):
-                    if not sitekey and self.last_recaptcha_sitekey:
-                        sitekey = self.last_recaptcha_sitekey
-                        logger.info("ℹ️ Usando sitekey extraída da página de login para resolver o reCAPTCHA")
-
                     token = self._resolver_recaptcha(sitekey, self.last_captcha_page_url or url_registro)
                     if token:
                         dados['g-recaptcha-response'] = token
@@ -1001,11 +1001,15 @@ class XATAccountGenerator:
     def _detectar_recaptcha(self, texto: str) -> bool:
         texto_lower = texto.lower()
 
-        # Detecta apenas quando existem indícios reais de reCAPTCHA/hCaptcha
         if 'data-sitekey=' in texto_lower or 'g-recaptcha' in texto_lower or 'h-captcha' in texto_lower:
             return True
 
-        # Evita falsos positivos em páginas bloqueadas que mencionam "captcha" de forma genérica
+        if 'registercap' in texto_lower and 'recaptcha' in texto_lower:
+            return True
+
+        if 'the recaptcha' in texto_lower or 'recaptcha wasn' in texto_lower or 'recaptcha said' in texto_lower:
+            return True
+
         return False
 
     def _extrair_sitekey(self, html: str) -> Optional[str]:
