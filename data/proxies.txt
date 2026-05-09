@@ -1,11 +1,3 @@
-# Lista de proxies - um por linha
-# Formato 1: ip:porta
-# Formato 2: ip:porta:username:password
-
-# Exemplos (SUBSTITUA COM PROXIES REAIS):
-# 192.168.1.1:8080
-# 10.0.0.1:3128
-# 203.0.113.5:8080:user:pass
 http://lgzhpoli:wt7q851p7gqa@31.59.20.176:6754
 http://lgzhpoli:wt7q851p7gqa@92.113.242.158:6742
 http://lgzhpoli:wt7q851p7gqa@198.23.239.134:6540
