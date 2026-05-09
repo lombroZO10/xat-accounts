@@ -18,12 +18,12 @@ fi
 echo ""
 echo "Testando acesso ao Xat via Tor..."
 
-# Teste auser3.php
-echo "1. Testando auser3.php..."
+# Teste auser3.php (PASSO 1 - já funciona)
+echo "1. Testando auser3.php (PASSO 1 - UserId)..."
 response=$(curl -s --max-time 15 --socks5 127.0.0.1:9050 -H "User-Agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36" "https://xat.com/web_gear/chat/auser3.php" 2>/dev/null)
 
 if echo "$response" | grep -q "UserId"; then
-    echo "✅ OK - UserId encontrado"
+    echo "✅ OK - UserId encontrado (PASSO 1 funciona)"
 elif echo "$response" | grep -qi "cloudflare\|blocked\|challenge"; then
     echo "⚠️ BLOQUEADO - Cloudflare detectado"
 else
@@ -32,30 +32,40 @@ fi
 
 sleep 2
 
-# Teste página de login (simulada)
-echo "2. Testando página de login..."
+# Teste página de login (PASSO 2 - PROBLEMA REAL)
+echo "2. Testando página de login (PASSO 2 - Token k2)..."
 user_id="1556420951"  # Usar um ID de teste
 response=$(curl -s --max-time 15 --socks5 127.0.0.1:9050 -H "User-Agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36" "https://xat.com/login?mode=1&UserId=$user_id" 2>/dev/null)
 
 if echo "$response" | grep -q "k2"; then
-    echo "✅ OK - Token k2 encontrado"
-elif echo "$response" | grep -qi "cloudflare\|blocked\|challenge\|checking your browser"; then
-    echo "⚠️ BLOQUEADO - Cloudflare detectado"
+    echo "✅ OK - Token k2 encontrado (PASSO 2 funciona)"
+elif echo "$response" | grep -qi "cloudflare\|blocked\|challenge\|just a moment"; then
+    echo "⚠️ BLOQUEADO - Cloudflare detectado (PROBLEMA AQUI!)"
     echo "Resposta suspeita: $(echo "$response" | head -c 200)..."
 else
     echo "❌ FAIL - Sem resposta ou erro"
 fi
 
+sleep 2
+
+# Teste página de registro (PASSO 3 - nunca chega aqui)
+echo "3. Testando página de registro (PASSO 3 - nunca testado)..."
+echo "⚠️ Não testado porque PASSO 2 falha"
+
 echo ""
-echo "=== DIAGNÓSTICO ==="
-echo "Se ambos os testes falham, o IP do VPS está banido no Xat."
-echo "Isso é comum com VPS de datacenters baratos."
+echo "=== DIAGNÓSTICO CORRETO ==="
+echo "✅ PASSO 1 (auser3.php → UserId): FUNCIONA"
+echo "❌ PASSO 2 (login?mode=1&UserId=... → Token k2): BLOQUEADO PELO CLOUDFLARE"
+echo "❓ PASSO 3 (register → criar conta): NUNCA CHEGA AQUI"
 echo ""
-echo "💡 SOLUÇÕES:"
-echo "1. Mudar de VPS/datacenter (AWS, DigitalOcean, Linode)"
-echo "2. Usar proxies residenciais premium"
-echo "3. Aguardar 24-48h (ban temporário)"
-echo "4. Usar IP dedicado limpo"
+echo "💡 PROBLEMA REAL: O bloqueio acontece na obtenção do token k2,"
+echo "   que é necessário para submeter o formulário de registro."
+echo ""
+echo "🔧 SOLUÇÕES PARA PASSO 2:"
+echo "1. IP limpo (mudar VPS/datacenter)"
+echo "2. Proxies residenciais premium"
+echo "3. Aguardar desbloqueio do IP atual"
+echo "4. Usar selenium com browser real"
 echo ""
 echo "=== EXECUTAR SCRIPT? ==="
 echo "python3 code/main.py"

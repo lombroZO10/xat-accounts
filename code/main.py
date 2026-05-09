@@ -599,58 +599,60 @@ class XATAccountGenerator:
             logger.warning(f"⚠️ Erro no fallback cloudscraper: {e}")
             return None
     
-    def obter_user_id(self) -> Optional[str]:
+    def obter_user_data(self) -> Optional[Dict[str, str]]:
         """
-        PASSO 1: Fazer GET para auser3.php e extrair UserID
+        PASSO 1: Fazer GET para auser3.php e extrair UserID, k1 e k2.
         """
         try:
-            logger.info(f"🔗 Obtendo UserID via {self.AUSER_URL}")
+            logger.info(f"🔗 Obtendo UserID/k1/k2 via {self.AUSER_URL}")
             resposta = self._fazer_requisicao('GET', self.AUSER_URL)
-            
+
             if not resposta:
                 logger.error("❌ Falha ao obter resposta de auser3.php")
                 return None
-            
+
             texto_resposta = self._decodificar_resposta(resposta)
-            
-            # Extrair UserID da resposta como query string, JSON ou HTML
             query_data = parse_qs(texto_resposta.lstrip('&').strip())
-            if query_data.get('UserId'):
-                user_id = query_data['UserId'][0]
-                logger.info(f"✅ UserID obtido via query string: {user_id}")
-                return user_id
 
-            # Tentar JSON
-            try:
-                json_data = json.loads(texto_resposta)
-                if 'UserId' in json_data:
-                    user_id = str(json_data['UserId'])
-                    logger.info(f"✅ UserID obtido via JSON: {user_id}")
-                    return user_id
-            except Exception:
-                pass
+            user_data: Dict[str, str] = {}
+            for chave in ['UserId', 'k1', 'k2']:
+                if query_data.get(chave):
+                    user_data[chave] = query_data[chave][0]
 
-            match = re.search(r'UserId["\']?\s*[:=]\s*["\']?(\d+)', texto_resposta, re.IGNORECASE)
-            if match:
-                user_id = match.group(1)
-                logger.info(f"✅ UserID obtido: {user_id}")
-                return user_id
-            
-            # Tentar alternativa (procurar em tags ou variáveis)
-            match = re.search(r'(\d{5,})', texto_resposta)
-            if match:
-                user_id = match.group(1)
-                logger.info(f"✅ UserID extraído (alternativo): {user_id}")
-                return user_id
-            
-            logger.error("❌ Não foi possível extrair UserID da resposta")
-            logger.info(f"Resposta recebida (primeiros 1000 chars): {texto_resposta[:1000]}")
-            return None
-        
+            # Tentar JSON caso a resposta seja JSON
+            if not user_data.get('UserId') or not user_data.get('k2'):
+                try:
+                    json_data = json.loads(texto_resposta)
+                    for chave in ['UserId', 'k1', 'k2']:
+                        if chave in json_data and json_data[chave]:
+                            user_data[chave] = str(json_data[chave])
+                except Exception:
+                    pass
+
+            # Fallback por regex
+            for chave in ['UserId', 'k1', 'k2']:
+                if not user_data.get(chave):
+                    match = re.search(rf'{chave}["\']?\s*[:=]\s*["\']?([^&"\'\s]+)', texto_resposta, re.IGNORECASE)
+                    if match:
+                        user_data[chave] = match.group(1)
+
+            if not user_data.get('UserId'):
+                logger.error("❌ Não foi possível extrair UserID da resposta de auser3.php")
+                logger.info(f"Resposta recebida (primeiros 1000 chars): {texto_resposta[:1000]}")
+                return None
+
+            if user_data.get('k2'):
+                logger.info(f"✅ UserData obtido: UserId={user_data.get('UserId')} k2={user_data.get('k2')[:30]}...")
+            else:
+                logger.warning("⚠️ UserId obtido, mas k2 não foi encontrado em auser3.php")
+                logger.info(f"Resposta de auser3.php: {texto_resposta[:500]}")
+
+            return user_data
+
         except Exception as e:
-            logger.error(f"❌ Erro ao obter UserID: {e}")
+            logger.error(f"❌ Erro ao obter dados de auser3.php: {e}")
             return None
-    
+
     def acessar_pagina_login(self, user_id: str) -> Optional[str]:
         """
         PASSO 2: Acessar página login para extrair token k2
@@ -1100,12 +1102,22 @@ class XATAccountGenerator:
                     continue
                 senha = self.gerar_senha()
                 
-                # PASSO 1: Obter UserID
-                user_id = self.obter_user_id()
-                if not user_id:
-                    logger.error(f"❌ Não foi possível obter UserID para {email}")
+                # PASSO 1: Obter UserId, k1 e k2 de auser3.php
+                user_data = self.obter_user_data()
+                if not user_data or not user_data.get('UserId'):
+                    logger.error(f"❌ Não foi possível obter UserId para {email}")
                     continue
-                
+
+                user_id = user_data['UserId']
+                k2_token = user_data.get('k2', '')
+
+                if not k2_token:
+                    logger.warning(f"⚠️ k2 não encontrado em auser3.php, tentando acessar login para extrair k2")
+                    k2_token = self.acessar_pagina_login(user_id)
+                    if k2_token is None:
+                        logger.error(f"❌ Falha ao obter k2 para {email}")
+                        continue
+
                 # Delay após requisição (configurável)
                 delay = random.uniform(
                     self.config['delays'].get('min_entre_requisicoes', 5),
@@ -1113,21 +1125,7 @@ class XATAccountGenerator:
                 )
                 logger.info(f"⏳ Aguardando {delay:.1f}s entre requisições...")
                 time.sleep(delay)
-                
-                # PASSO 2: Acessar página de login (usando mesmo proxy da sessão)
-                k2_token = self.acessar_pagina_login(user_id)
-                if k2_token is None:
-                    logger.error(f"❌ Falha ao acessar login para {email}")
-                    continue
-                
-                # Delay após requisição
-                delay = random.uniform(
-                    self.config['delays'].get('min_entre_requisicoes', 5),
-                    self.config['delays'].get('max_entre_requisicoes', 10)
-                )
-                logger.info(f"⏳ Aguardando {delay:.1f}s entre requisições...")
-                time.sleep(delay)
-                
+
                 # PASSO 3 e 4: Criar conta (usando mesmo proxy da sessão)
                 sucesso = self.criar_conta(username, senha, email, user_id, k2_token)
                 
