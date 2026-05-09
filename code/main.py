@@ -1056,16 +1056,31 @@ class XATAccountGenerator:
                     continue
 
                 user_id = user_data['UserId']
-                k2_token = user_data.get('k2', '')
-
-                if not k2_token:
-                    logger.warning(f"⚠️ k2 não encontrado em auser3.php, tentando acessar login para extrair k2")
-                    k2_token = self.acessar_pagina_login(user_id)
-                    if k2_token is None:
-                        logger.error(f"❌ Falha ao obter k2 para {email}")
-                        continue
+                k2_token_initial = user_data.get('k2', '')
 
                 # Delay após requisição (configurável)
+                delay = random.uniform(
+                    self.config['delays'].get('min_entre_requisicoes', 5),
+                    self.config['delays'].get('max_entre_requisicoes', 10)
+                )
+                logger.info(f"⏳ Aguardando {delay:.1f}s entre requisições...")
+                time.sleep(delay)
+
+                # PASSO 2: Acessar página de login para preparar sessão (SEMPRE necessário)
+                logger.info(f"🔗 Preparando sessão de login com UserId: {user_id}")
+                k2_token = self.acessar_pagina_login(user_id)
+                if k2_token is None:
+                    logger.error(f"❌ Falha ao acessar página de login para {email}")
+                    continue
+
+                if not k2_token and k2_token_initial:
+                    logger.warning(f"⚠️ Usando k2 original de auser3.php como fallback")
+                    k2_token = k2_token_initial
+                elif not k2_token:
+                    logger.warning(f"⚠️ Nenhum k2 disponível, tentando prosseguir sem ele")
+                    k2_token = ""
+
+                # Delay após requisição
                 delay = random.uniform(
                     self.config['delays'].get('min_entre_requisicoes', 5),
                     self.config['delays'].get('max_entre_requisicoes', 10)
