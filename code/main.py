@@ -767,20 +767,16 @@ class XATAccountGenerator:
                 'agree': 'ON',
                 'Register': 1,
                 'UserId': user_id,
-                'k2': k2_token,
-                'json': json.dumps({
-                    'name': username,
-                    'password': senha,
-                    'email': email,
-                    'NameEmail': email
-                })
+                'k2': k2_token
             }
 
             # Headers adicionais para fazer parecer um navegador real
             headers = {
                 'Referer': f"{self.LOGIN_URL}?mode=1&UserId={user_id}&k2={k2_token}",
                 'Origin': self.BASE_URL,
-                'Content-Type': 'application/x-www-form-urlencoded'
+                'Content-Type': 'application/x-www-form-urlencoded',
+                'X-Requested-With': 'XMLHttpRequest',
+                'Accept': 'application/json, text/javascript, */*; q=0.01'
             }
 
             url_registro = f"{self.BASE_URL}/register"
@@ -836,14 +832,43 @@ class XATAccountGenerator:
         logger.debug(f"Headers: {dict(resposta.headers)}")
         logger.debug(f"Resposta completa (primeiros 1000 chars): {texto[:1000]}")
 
-        # Verificar mensagens de erro específicas
+        json_data = None
+        try:
+            json_data = json.loads(texto)
+        except Exception:
+            json_data = None
+
+        if isinstance(json_data, dict):
+            if 'UserId' in json_data and 'k2' in json_data:
+                logger.info(f"✅ Registro confirmado via resposta JSON para {username}")
+                return True
+
+            err_obj = json_data.get('Err') or json_data.get('err')
+            if isinstance(err_obj, dict):
+                errors = []
+                success_flags = []
+                for key, value in err_obj.items():
+                    if value:
+                        if key in ['regdone', 'captoken', 'loginok', 'Settings']:
+                            success_flags.append(key)
+                        else:
+                            errors.append(f"{key}: {value}")
+
+                if success_flags:
+                    logger.info(f"✅ Registro atualizado via resposta JSON para {username}: {', '.join(success_flags)}")
+                    return True
+                if errors:
+                    logger.warning(f"⚠️ Resposta JSON com erro(s) para {username}: {' | '.join(errors)}")
+                    return False
+
+        # Verificar mensagens de erro específicas no HTML/texto
         error_keywords = [
             'username already exists', 'já existe', 'username taken', 'nome de usuário já em uso',
             'email already registered', 'email já cadastrado', 'email already exists',
             'invalid username', 'username inválido', 'username not allowed',
             'password too weak', 'senha muito fraca', 'password requirements not met',
             'registration failed', 'falha no cadastro', 'account creation failed',
-            'error', 'erro', 'failed', 'falhou', 'invalid', 'inválido',
+            'error', 'erro', 'falhou', 'invalid', 'inválido',
             'banned', 'banido', 'suspended', 'suspenso',
             'rate limit', 'limite de taxa', 'too many requests',
             'captcha', 'recaptcha', 'verification failed',
@@ -860,14 +885,12 @@ class XATAccountGenerator:
 
         # Verificar se há redirecionamento para página de sucesso ou login
         if resposta.status_code in [200, 302, 303]:
-            # Verificar se foi redirecionado para login ou página inicial (sucesso)
             if 'location' in resposta.headers:
                 location = resposta.headers['location'].lower()
                 if 'login' in location or 'home' in location or 'welcome' in location or 'success' in location:
                     logger.info(f"✅ Conta criada com sucesso: {username} (redirecionamento detectado)")
                     return True
 
-            # Verificar mensagens positivas
             success_keywords = [
                 'success', 'sucesso', 'account created', 'conta criada',
                 'registration successful', 'cadastro realizado',
@@ -881,10 +904,8 @@ class XATAccountGenerator:
                     logger.info(f"✅ Conta criada com sucesso: {username}")
                     return True
 
-            # Verificar se a página contém elementos de formulário de login (indicando falha)
             if resposta.status_code == 200:
                 soup = BeautifulSoup(texto, 'html.parser')
-                # Se há formulário de login na página, provavelmente falhou
                 login_form = soup.find('form', {'action': lambda x: x and 'login' in x.lower()}) or \
                             soup.find('input', {'name': 'username'}) and soup.find('input', {'name': 'password'})
                 if login_form:
@@ -892,14 +913,12 @@ class XATAccountGenerator:
                     logger.debug(f"Resposta suspeita: {texto[:500]}")
                     return False
 
-                # Verificar se há mensagens de erro no HTML
                 error_elements = soup.find_all(['div', 'span', 'p'], class_=lambda x: x and ('error' in x.lower() or 'alert' in x.lower() or 'danger' in x.lower()))
                 for element in error_elements:
                     if element.get_text().strip():
                         logger.warning(f"⚠️ Elemento de erro encontrado no HTML: {element.get_text().strip()}")
                         return False
 
-                # Verificar por elementos que indicam bloqueio ou proteção
                 block_indicators = soup.find_all(text=lambda text: text and any(word in text.lower() for word in ['blocked', 'bloqueado', 'ban', 'banido', 'suspended', 'suspenso', 'security', 'seguranca', 'protection', 'protecao', 'firewall', 'waf']))
                 if block_indicators:
                     logger.warning(f"⚠️ Indicadores de bloqueio detectados na resposta para {username}")
@@ -907,12 +926,10 @@ class XATAccountGenerator:
                         logger.debug(f"Indicador de bloqueio: {indicator.strip()}")
                     return False
 
-                # Se não há erros e não há formulário de login, assumir sucesso mas logar como suspeito
                 logger.info(f"✅ Resposta 200 OK - Conta possivelmente criada: {username} (sem confirmação clara)")
                 logger.debug(f"Resposta 200 sem confirmação: {texto[:500]}")
                 return True
 
-        # Status codes de erro
         if resposta.status_code >= 400:
             logger.warning(f"⚠️ Status code de erro {resposta.status_code} para {username}")
             logger.debug(f"Resposta de erro: {texto[:500]}")
