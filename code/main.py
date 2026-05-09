@@ -822,7 +822,7 @@ class XATAccountGenerator:
                 'Accept': 'application/json, text/javascript, */*; q=0.01'
             }
 
-            url_registro = f"{self.BASE_URL}/register"
+            url_registro = f"{self.BASE_URL}/web_gear/chat/register5.php"
             resposta = self._fazer_requisicao('POST', url_registro, data=dados, headers=headers)
 
             if not resposta:
