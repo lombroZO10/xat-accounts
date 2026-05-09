@@ -47,5 +47,15 @@ else
 fi
 
 echo ""
-echo "=== SE TOR FUNCIONAR, EXECUTE O SCRIPT ==="
+echo "=== DIAGNÓSTICO ==="
+echo "Se ambos os testes falham, o IP do VPS está banido no Xat."
+echo "Isso é comum com VPS de datacenters baratos."
+echo ""
+echo "💡 SOLUÇÕES:"
+echo "1. Mudar de VPS/datacenter (AWS, DigitalOcean, Linode)"
+echo "2. Usar proxies residenciais premium"
+echo "3. Aguardar 24-48h (ban temporário)"
+echo "4. Usar IP dedicado limpo"
+echo ""
+echo "=== EXECUTAR SCRIPT? ==="
 echo "python3 code/main.py"
