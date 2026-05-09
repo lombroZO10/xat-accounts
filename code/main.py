@@ -400,59 +400,6 @@ class XATAccountGenerator:
                 logger.warning(f"⚠️ Proxy atual falhou: {e}")
                 # Se proxy atual falhar, resetar e tentar outros
                 self._set_current_proxy(None)
-        
-        # Modo Tor exclusivo
-        if self.config['proxy'].get('rotacao') == 'tor_only':
-            tor_proxy = {'http': 'socks5://127.0.0.1:9050', 'https': 'socks5://127.0.0.1:9050'}
-            logger.info(f"🧅 Usando Tor para {url.split('/')[-1]}")
-            kwargs['proxies'] = tor_proxy
-            kwargs['timeout'] = self.config['timeout'].get('requisicao', 20)
-            
-            # Rotacionar User-Agent
-            self.session.headers['User-Agent'] = random.choice(self.USER_AGENTS)
-            
-            max_tor_attempts = 3
-            for attempt in range(max_tor_attempts):
-                try:
-                    if method.upper() == 'GET':
-                        resposta = self.session.get(url, **kwargs)
-                    elif method.upper() == 'POST':
-                        resposta = self.session.post(url, **kwargs)
-                    else:
-                        return None
-                    
-                    # Verificar bloqueios
-                    if resposta.status_code in [403, 503] or any(term in resposta.text.lower() for term in ['checking your browser', 'cloudflare', 'cf-challenge', 'cf-browser-verification']):
-                        logger.warning(f"⚠️ Bloqueio detectado com Tor (tentativa {attempt + 1}), tentando cloudscraper...")
-                        if self.scraper:
-                            scraper_kwargs = {k: v for k, v in kwargs.items() if k != 'proxies'}
-                            scraper_kwargs['proxies'] = tor_proxy
-                            scraper_response = self._fazer_requisicao_com_cloudscraper(method, url, **scraper_kwargs)
-                            if scraper_response:
-                                return scraper_response
-                        if attempt < max_tor_attempts - 1:
-                            logger.info("🔄 Renovando circuito Tor...")
-                            # Tentar renovar circuito Tor
-                            import subprocess
-                            try:
-                                subprocess.run(['sudo', 'killall', '-HUP', 'tor'], capture_output=True)
-                                time.sleep(3)
-                            except:
-                                pass
-                            time.sleep(2)
-                        continue
-                    
-                    resposta.raise_for_status()
-                    self._set_current_proxy(tor_proxy)  # Manter Tor como proxy atual
-                    return resposta
-                    
-                except Exception as e:
-                    logger.warning(f"⚠️ Tor falhou (tentativa {attempt + 1}/{max_tor_attempts}): {e}")
-                    if attempt < max_tor_attempts - 1:
-                        time.sleep(2)
-            
-            return None
-        
         # Lógica original de rotação de proxies
         proxy_groups = []
         if self.paid_proxies:
