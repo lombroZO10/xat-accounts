@@ -95,6 +95,8 @@ class XATAccountGenerator:
         self.session = self._criar_sessao()
         self.scraper = self._criar_scraper()
         self.current_proxy = None  # Proxy atual para manter sessão
+        self.last_recaptcha_sitekey: Optional[str] = None
+        self.last_captcha_page_url: Optional[str] = None
         
         logger.info("🚀 XAT Account Generator iniciado")
 
@@ -591,19 +593,9 @@ class XATAccountGenerator:
     
     def obter_user_data(self) -> Optional[Dict[str, str]]:
         """
-        PASSO 1: Simular entrada no chat e extrair UserID, k1 e k2.
+        PASSO 1: Obter UserID, k1 e k2 via auser3.php.
         """
         try:
-            # Primeiro: Simular entrada no chat (equivalente ao usuário entrar no bate-papo)
-            logger.info(f"🔗 Simulando entrada no chat para obter sessão...")
-            chat_url = f"{self.BASE_URL}/chat.php?id=2"
-            resposta_chat = self._fazer_requisicao('GET', chat_url)
-            if resposta_chat:
-                logger.info("✅ Entrada no chat simulada com sucesso")
-            else:
-                logger.warning("⚠️ Falha ao simular entrada no chat, continuando mesmo assim")
-
-            # Segundo: Obter UserID/k1/k2 via auser3.php (equivalente a tentar mudar nome)
             logger.info(f"🔗 Obtendo UserID/k1/k2 via {self.AUSER_URL}")
             resposta = self._fazer_requisicao('GET', self.AUSER_URL)
 
@@ -659,6 +651,8 @@ class XATAccountGenerator:
         Retorna o token k2 ou string vazia se a página for carregada corretamente mas k2 não estiver no HTML.
         """
         try:
+            self.last_recaptcha_sitekey = None
+            self.last_captcha_page_url = None
             url = f"{self.LOGIN_URL}?mode=1&UserId={user_id}"
             if k2_token:
                 url = f"{url}&k2={k2_token}"
@@ -753,7 +747,13 @@ class XATAccountGenerator:
             
             if has_login_form or soup.find('input', {'name': 'username'}) or soup.find('input', {'type': 'password'}):
                 logger.info(f"✅ Página de login válida encontrada para UserId {user_id}")
-            
+
+            # Tentar extrair sitekey de reCAPTCHA da página de login
+            self.last_recaptcha_sitekey = self._extrair_sitekey(texto_resposta)
+            self.last_captcha_page_url = url
+            if self.last_recaptcha_sitekey:
+                logger.info(f"✅ Sitekey de reCAPTCHA capturada da página de login: {self.last_recaptcha_sitekey}")
+
             # Tentar extrair k2 de input hidden
             input_k2 = soup.find('input', {'name': 'k2'}) or soup.find('input', {'id': 'k2'})
             if input_k2 and input_k2.get('value'):
@@ -851,7 +851,11 @@ class XATAccountGenerator:
                     return False
 
                 if self.config['captcha_solver'].get('enabled', False):
-                    token = self._resolver_recaptcha(sitekey, url_registro)
+                    if not sitekey and self.last_recaptcha_sitekey:
+                        sitekey = self.last_recaptcha_sitekey
+                        logger.info("ℹ️ Usando sitekey extraída da página de login para resolver o reCAPTCHA")
+
+                    token = self._resolver_recaptcha(sitekey, self.last_captcha_page_url or url_registro)
                     if token:
                         dados['g-recaptcha-response'] = token
                         resposta = self._fazer_requisicao('POST', url_registro, data=dados, headers=headers)
