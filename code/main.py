@@ -592,9 +592,19 @@ class XATAccountGenerator:
     
     def obter_user_data(self) -> Optional[Dict[str, str]]:
         """
-        PASSO 1: Fazer GET para auser3.php e extrair UserID, k1 e k2.
+        PASSO 1: Simular entrada no chat e extrair UserID, k1 e k2.
         """
         try:
+            # Primeiro: Simular entrada no chat (equivalente ao usuário entrar no bate-papo)
+            logger.info(f"🔗 Simulando entrada no chat para obter sessão...")
+            chat_url = f"{self.BASE_URL}/embed/chat.php?id=2"
+            resposta_chat = self._fazer_requisicao('GET', chat_url)
+            if resposta_chat:
+                logger.info("✅ Entrada no chat simulada com sucesso")
+            else:
+                logger.warning("⚠️ Falha ao simular entrada no chat, continuando mesmo assim")
+
+            # Segundo: Obter UserID/k1/k2 via auser3.php (equivalente a tentar mudar nome)
             logger.info(f"🔗 Obtendo UserID/k1/k2 via {self.AUSER_URL}")
             resposta = self._fazer_requisicao('GET', self.AUSER_URL)
 
@@ -831,15 +841,19 @@ class XATAccountGenerator:
 
             texto_resposta = self._decodificar_resposta(resposta)
             if self._detectar_recaptcha(texto_resposta):
-                logger.warning(f"⚠️ reCAPTCHA detectado para {email}. Tentando identificar motivo e dados relevantes...")
                 sitekey = self._extrair_sitekey(texto_resposta)
                 if sitekey:
-                    logger.warning(f"⚠️ Sitekey encontrado: {sitekey}")
+                    logger.warning(f"⚠️ reCAPTCHA detectado para {email}. Sitekey encontrada: {sitekey}")
                 else:
-                    logger.warning("⚠️ Sitekey de reCAPTCHA não encontrado no HTML")
+                    logger.warning("⚠️ Possível bloqueio ou resposta inválida contendo 'captcha', mas sem sitekey de reCAPTCHA")
+
+                if not sitekey:
+                    logger.warning(f"⚠️ Não foi possível criar conta devido a bloqueio/recaptcha não resolvível para {email}")
+                    logger.debug(f"Resposta suspeita de bloqueio: {texto_resposta[:500]}")
+                    return False
 
                 if self.config['captcha_solver'].get('enabled', False):
-                    token = self._resolver_recaptcha(sitekey or '', url_registro)
+                    token = self._resolver_recaptcha(sitekey, url_registro)
                     if token:
                         dados['g-recaptcha-response'] = token
                         resposta = self._fazer_requisicao('POST', url_registro, data=dados, headers=headers)
@@ -983,8 +997,14 @@ class XATAccountGenerator:
         return False
 
     def _detectar_recaptcha(self, texto: str) -> bool:
-        texto = texto.lower()
-        return 'recaptcha' in texto or 'g-recaptcha' in texto or 'h-captcha' in texto or 'captcha' in texto
+        texto_lower = texto.lower()
+
+        # Detecta apenas quando existem indícios reais de reCAPTCHA/hCaptcha
+        if 'data-sitekey=' in texto_lower or 'g-recaptcha' in texto_lower or 'h-captcha' in texto_lower:
+            return True
+
+        # Evita falsos positivos em páginas bloqueadas que mencionam "captcha" de forma genérica
+        return False
 
     def _extrair_sitekey(self, html: str) -> Optional[str]:
         match = re.search(r'data-sitekey=["\']([^"\']+)["\']', html, re.IGNORECASE)
