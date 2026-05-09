@@ -29,23 +29,24 @@ LOG_FILE = PROJECT_ROOT / 'criacao_contas.log'
 
 DEFAULT_CONFIG = {
     "delays": {
-        "min_entre_requisicoes": 0.5,
-        "max_entre_requisicoes": 2,
-        "min_entre_contas": 1,
-        "max_entre_contas": 3
+        "min_entre_requisicoes": 5,
+        "max_entre_requisicoes": 15,
+        "min_entre_contas": 30,
+        "max_entre_contas": 60
     },
     "timeout": {
-        "requisicao": 15,
-        "proxy": 10
+        "requisicao": 30,
+        "proxy": 20
     },
     "retry": {
         "max_tentativas": 3,
-        "delay_entre_tentativas": 1
+        "delay_entre_tentativas": 5
     },
     "proxy": {
         "rotacao": "por_requisicao",
         "health_check": False,
-        "use_public_fallback": True
+        "use_public_fallback": True,
+        "force_proxy": True  # Forçar uso de proxy em todas as requisições
     },
     "captcha_solver": {
         "enabled": False,
@@ -345,6 +346,11 @@ class XATAccountGenerator:
         skip_endpoints = self.config['proxy'].get('skip_for_endpoints', [])
         
         should_skip_proxy = force_direct or any(ep in url for ep in skip_endpoints)
+        force_proxy = self.config['proxy'].get('force_proxy', False)
+        
+        if force_proxy and not should_skip_proxy:
+            should_skip_proxy = False
+            logger.info(f"🔒 Forçando uso de proxy para {url.split('/')[-1]} (configuração force_proxy)")
         
         if should_skip_proxy:
             logger.info(f"🔓 Acessando {url.split('/')[-1]} sem proxy (acesso direto)")
@@ -553,20 +559,70 @@ class XATAccountGenerator:
         try:
             url = f"{self.LOGIN_URL}?mode=1&UserId={user_id}"
             logger.info(f"🔗 Acessando página de login com UserId: {user_id}")
-            
-            resposta = self._fazer_requisicao('GET', url)
-            
+
+            # Tentar primeiro com cloudscraper se disponível
+            resposta = None
+            if self.scraper:
+                logger.info("🔄 Tentando acesso com cloudscraper primeiro")
+                resposta = self._fazer_requisicao_com_cloudscraper('GET', url, headers=self.session.headers)
+                if resposta and resposta.status_code == 200:
+                    logger.info("✅ Acesso com cloudscraper bem-sucedido")
+                else:
+                    logger.warning("⚠️ Cloudscraper falhou, tentando requests normal")
+
+            # Fallback para requests normal se cloudscraper falhou ou não está disponível
+            if not resposta or resposta.status_code != 200:
+                resposta = self._fazer_requisicao('GET', url)
+
             if not resposta:
                 logger.error("❌ Falha ao acessar página de login")
                 return None
 
             texto_resposta = self._decodificar_resposta(resposta)
-            
-            if self.scraper and (resposta.status_code in [403, 503] or any(term in texto_resposta.lower() for term in ['checking your browser', 'cloudflare', 'cf-challenge', 'cf-browser-verification'])):
-                logger.warning("⚠️ Cloudflare ou bloqueio detectado na página de login; tentando fallback cloudscraper")
-                fallback = self._fazer_requisicao_com_cloudscraper('GET', url, headers=self.session.headers)
-                if fallback:
-                    texto_resposta = self._decodificar_resposta(fallback)
+
+            # Verificar se há bloqueios ou proteção na resposta
+            block_terms = [
+                'checking your browser', 'cf-challenge', 'cf-browser-verification',
+                'access denied', 'acesso negado', 'forbidden', 'proibido',
+                'rate limit exceeded', 'limite de taxa excedido', 'too many requests',
+                'blocked by cloudflare', 'bloqueado pelo cloudflare',
+                'security error', 'erro de segurança', 'protection mode', 'modo de proteção'
+            ]
+
+            # Só considerar bloqueio se múltiplos indicadores estiverem presentes
+            found_terms = [term for term in block_terms if term in texto_resposta.lower()]
+            has_cloudflare = 'cloudflare' in texto_resposta.lower()
+            has_blocked = 'blocked' in texto_resposta.lower() or 'bloqueado' in texto_resposta.lower()
+
+            if found_terms or (has_cloudflare and has_blocked):
+                logger.warning(f"⚠️ Bloqueio ou proteção detectada na página de login para UserId {user_id}")
+                logger.debug(f"Indicadores encontrados: {found_terms}")
+                if has_cloudflare:
+                    logger.debug("Cloudflare detectado na resposta")
+                if has_blocked:
+                    logger.debug("'blocked' encontrado na resposta")
+
+                # Tentar uma última vez com cloudscraper se ainda não foi usado
+                if self.scraper and resposta != self._fazer_requisicao_com_cloudscraper('GET', url, headers=self.session.headers):
+                    logger.warning("🔄 Tentando novamente com cloudscraper...")
+                    resposta = self._fazer_requisicao_com_cloudscraper('GET', url, headers=self.session.headers)
+                    if resposta:
+                        texto_resposta = self._decodificar_resposta(resposta)
+                        # Verificar novamente se o bloqueio foi resolvido
+                        new_found_terms = [term for term in block_terms if term in texto_resposta.lower()]
+                        new_has_cloudflare = 'cloudflare' in texto_resposta.lower()
+                        new_has_blocked = 'blocked' in texto_resposta.lower() or 'bloqueado' in texto_resposta.lower()
+
+                        if not new_found_terms and not (new_has_cloudflare and new_has_blocked):
+                            logger.info("✅ Cloudscraper resolveu o bloqueio!")
+                        else:
+                            logger.warning("⚠️ Mesmo com cloudscraper, bloqueio persiste")
+                            logger.warning("💡 Solução: Use proxy residencial ou aguarde desbloqueio do IP")
+                            return None
+                    else:
+                        return None
+                else:
+                    return None
 
             soup = BeautifulSoup(texto_resposta, 'html.parser')
             input_k2 = soup.find('input', {'name': 'k2'}) or soup.find('input', {'id': 'k2'})
@@ -681,6 +737,10 @@ class XATAccountGenerator:
         texto = self._decodificar_resposta(resposta)
         texto_lower = texto.lower()
 
+        logger.debug(f"Status code: {resposta.status_code}")
+        logger.debug(f"Headers: {dict(resposta.headers)}")
+        logger.debug(f"Resposta completa (primeiros 1000 chars): {texto[:1000]}")
+
         # Verificar mensagens de erro específicas
         error_keywords = [
             'username already exists', 'já existe', 'username taken', 'nome de usuário já em uso',
@@ -691,13 +751,16 @@ class XATAccountGenerator:
             'error', 'erro', 'failed', 'falhou', 'invalid', 'inválido',
             'banned', 'banido', 'suspended', 'suspenso',
             'rate limit', 'limite de taxa', 'too many requests',
-            'captcha', 'recaptcha', 'verification failed'
+            'captcha', 'recaptcha', 'verification failed',
+            'blocked', 'bloqueado', 'block', 'ban',
+            'forbidden', 'proibido', 'access denied', 'acesso negado',
+            'security', 'seguranca', 'protection', 'protecao'
         ]
 
         for error in error_keywords:
             if error in texto_lower:
                 logger.warning(f"⚠️ Erro detectado na resposta: '{error}' para {username}")
-                logger.debug(f"Resposta de erro: {texto[:500]}")
+                logger.debug(f"Resposta de erro completa: {texto}")
                 return False
 
         # Verificar se há redirecionamento para página de sucesso ou login
@@ -723,8 +786,7 @@ class XATAccountGenerator:
                     logger.info(f"✅ Conta criada com sucesso: {username}")
                     return True
 
-            # Se status 200 e não há erros óbvios, mas também não há confirmação clara,
-            # verificar se a página contém elementos de formulário de login (indicando que não foi criada)
+            # Verificar se a página contém elementos de formulário de login (indicando falha)
             if resposta.status_code == 200:
                 soup = BeautifulSoup(texto, 'html.parser')
                 # Se há formulário de login na página, provavelmente falhou
@@ -733,6 +795,21 @@ class XATAccountGenerator:
                 if login_form:
                     logger.warning(f"⚠️ Formulário de login detectado na resposta - conta não criada: {username}")
                     logger.debug(f"Resposta suspeita: {texto[:500]}")
+                    return False
+
+                # Verificar se há mensagens de erro no HTML
+                error_elements = soup.find_all(['div', 'span', 'p'], class_=lambda x: x and ('error' in x.lower() or 'alert' in x.lower() or 'danger' in x.lower()))
+                for element in error_elements:
+                    if element.get_text().strip():
+                        logger.warning(f"⚠️ Elemento de erro encontrado no HTML: {element.get_text().strip()}")
+                        return False
+
+                # Verificar por elementos que indicam bloqueio ou proteção
+                block_indicators = soup.find_all(text=lambda text: text and any(word in text.lower() for word in ['blocked', 'bloqueado', 'ban', 'banido', 'suspended', 'suspenso', 'security', 'seguranca', 'protection', 'protecao', 'firewall', 'waf']))
+                if block_indicators:
+                    logger.warning(f"⚠️ Indicadores de bloqueio detectados na resposta para {username}")
+                    for indicator in block_indicators:
+                        logger.debug(f"Indicador de bloqueio: {indicator.strip()}")
                     return False
 
                 # Se não há erros e não há formulário de login, assumir sucesso mas logar como suspeito
