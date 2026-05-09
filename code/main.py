@@ -85,6 +85,7 @@ class XATAccountGenerator:
     def __init__(self):
         """Inicializa o gerador de contas"""
         self.emails: List[str] = []
+        self.usernames: List[str] = []
         self.paid_proxies: List[str] = []
         self.public_proxies: List[str] = []
         self.proxy_indexes = {'paid': 0, 'public': 0}
@@ -196,6 +197,31 @@ class XATAccountGenerator:
             logger.error(f"❌ Erro ao carregar emails: {e}")
             return False
     
+    def carregar_usernames(self) -> bool:
+        """Carrega usernames do arquivo usernames.txt"""
+        arquivo = DATA_DIR / 'usernames.txt'
+        
+        if not arquivo.exists():
+            logger.error(f"❌ Arquivo {arquivo} não encontrado!")
+            return False
+        
+        try:
+            with open(arquivo, 'r', encoding='utf-8') as f:
+                usernames = [linha.strip() for linha in f.readlines() if linha.strip()]
+            
+            # Filtrar usernames duplicados
+            self.usernames = []
+            for username in usernames:
+                if username not in self.usernames:
+                    self.usernames.append(username)
+            
+            logger.info(f"✅ Carregados {len(self.usernames)} usernames disponíveis")
+            return True
+        
+        except Exception as e:
+            logger.error(f"❌ Erro ao carregar usernames: {e}")
+            return False
+    
     def carregar_proxies(self) -> bool:
         """Carrega proxies pagos e proxies públicos"""
         self.paid_proxies = self._load_proxy_file(DATA_DIR / 'proxies.txt')
@@ -236,11 +262,26 @@ class XATAccountGenerator:
         padrao = r'^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$'
         return re.match(padrao, email) is not None
     
-    def gerar_username(self, tamanho_min: int = 10, tamanho_max: int = 18) -> str:
-        """Gera username aleatório com 10-18 caracteres"""
-        tamanho = random.randint(tamanho_min, tamanho_max)
-        caracteres = string.ascii_letters + string.digits
-        return ''.join(random.choice(caracteres) for _ in range(tamanho))
+    def gerar_username(self) -> Optional[str]:
+        """Retorna um username da lista pré-definida"""
+        if not self.usernames:
+            logger.warning("⚠️ Lista de usernames vazia! Adicione usernames em usernames.txt")
+            return None
+        return random.choice(self.usernames)
+    
+    def remover_username(self, username: str) -> None:
+        """Remove um username da lista após uso bem-sucedido"""
+        if username in self.usernames:
+            self.usernames.remove(username)
+            # Salvar a lista atualizada no arquivo
+            arquivo = DATA_DIR / 'usernames.txt'
+            try:
+                with open(arquivo, 'w', encoding='utf-8') as f:
+                    for u in self.usernames:
+                        f.write(u + '\n')
+                logger.debug(f"✅ Username {username} removido da lista")
+            except Exception as e:
+                logger.warning(f"⚠️ Erro ao salvar usernames atualizados: {e}")
     
     def gerar_senha(self, tamanho_min: int = 8, tamanho_max: int = 16) -> str:
         """Gera senha aleatória forte (maiúsculas, minúsculas, números, símbolos)"""
@@ -640,28 +681,70 @@ class XATAccountGenerator:
         texto = self._decodificar_resposta(resposta)
         texto_lower = texto.lower()
 
-        if any(palavra in texto_lower for palavra in ['sucesso', 'success', 'criada com sucesso', 'account created', 'bem-vindo', 'welcome', 'confirme seu email']):
-            logger.info(f"✅ Conta criada com sucesso: {username}")
-            return True
+        # Verificar mensagens de erro específicas
+        error_keywords = [
+            'username already exists', 'já existe', 'username taken', 'nome de usuário já em uso',
+            'email already registered', 'email já cadastrado', 'email already exists',
+            'invalid username', 'username inválido', 'username not allowed',
+            'password too weak', 'senha muito fraca', 'password requirements not met',
+            'registration failed', 'falha no cadastro', 'account creation failed',
+            'error', 'erro', 'failed', 'falhou', 'invalid', 'inválido',
+            'banned', 'banido', 'suspended', 'suspenso',
+            'rate limit', 'limite de taxa', 'too many requests',
+            'captcha', 'recaptcha', 'verification failed'
+        ]
 
-        if any(palavra in texto_lower for palavra in ['já existe', 'already exists', 'duplicado', 'duplicate']):
-            logger.warning(f"⚠️ Username já existe: {username}")
+        for error in error_keywords:
+            if error in texto_lower:
+                logger.warning(f"⚠️ Erro detectado na resposta: '{error}' para {username}")
+                logger.debug(f"Resposta de erro: {texto[:500]}")
+                return False
+
+        # Verificar se há redirecionamento para página de sucesso ou login
+        if resposta.status_code in [200, 302, 303]:
+            # Verificar se foi redirecionado para login ou página inicial (sucesso)
+            if 'location' in resposta.headers:
+                location = resposta.headers['location'].lower()
+                if 'login' in location or 'home' in location or 'welcome' in location or 'success' in location:
+                    logger.info(f"✅ Conta criada com sucesso: {username} (redirecionamento detectado)")
+                    return True
+
+            # Verificar mensagens positivas
+            success_keywords = [
+                'success', 'sucesso', 'account created', 'conta criada',
+                'registration successful', 'cadastro realizado',
+                'welcome', 'bem-vindo', 'thank you', 'obrigado',
+                'confirm your email', 'confirme seu email',
+                'check your email', 'verifique seu email'
+            ]
+
+            for success in success_keywords:
+                if success in texto_lower:
+                    logger.info(f"✅ Conta criada com sucesso: {username}")
+                    return True
+
+            # Se status 200 e não há erros óbvios, mas também não há confirmação clara,
+            # verificar se a página contém elementos de formulário de login (indicando que não foi criada)
+            if resposta.status_code == 200:
+                soup = BeautifulSoup(texto, 'html.parser')
+                # Se há formulário de login na página, provavelmente falhou
+                login_form = soup.find('form', {'action': lambda x: x and 'login' in x.lower()}) or \
+                            soup.find('input', {'name': 'username'}) and soup.find('input', {'name': 'password'})
+                if login_form:
+                    logger.warning(f"⚠️ Formulário de login detectado na resposta - conta não criada: {username}")
+                    logger.debug(f"Resposta suspeita: {texto[:500]}")
+                    return False
+
+                # Se não há erros e não há formulário de login, assumir sucesso mas logar como suspeito
+                logger.info(f"✅ Resposta 200 OK - Conta possivelmente criada: {username} (sem confirmação clara)")
+                logger.debug(f"Resposta 200 sem confirmação: {texto[:500]}")
+                return True
+
+        # Status codes de erro
+        if resposta.status_code >= 400:
+            logger.warning(f"⚠️ Status code de erro {resposta.status_code} para {username}")
+            logger.debug(f"Resposta de erro: {texto[:500]}")
             return False
-
-        if self._detectar_recaptcha(texto):
-            logger.warning(f"⚠️ reCAPTCHA detectado na resposta de criação da conta para {username}")
-            logger.debug(f"Resposta de criação com recaptcha: {texto[:500]}")
-            return False
-
-        if resposta.status_code in [403, 429, 503]:
-            logger.warning(f"⚠️ Resposta de criação inesperada com status {resposta.status_code} para {username}")
-            logger.debug(f"Resposta: {texto[:500]}")
-            return False
-
-        if resposta.status_code == 200:
-            logger.info(f"✅ Resposta 200 OK - Conta possivelmente criada: {username}")
-            logger.debug(f"Resposta 200 de criação: {texto[:500]}")
-            return True
 
         logger.warning(f"⚠️ Resposta inesperada (status {resposta.status_code}) para {username}")
         logger.debug(f"Resposta: {texto[:500]}")
@@ -813,6 +896,9 @@ class XATAccountGenerator:
                 
                 # Gerar dados da conta
                 username = self.gerar_username()
+                if not username:
+                    logger.error("❌ Nenhum username disponível para gerar conta")
+                    continue
                 senha = self.gerar_senha()
                 
                 # PASSO 1: Obter UserID
@@ -847,6 +933,7 @@ class XATAccountGenerator:
                 sucesso = self.criar_conta(username, senha, email, user_id, k2_token)
                 
                 if sucesso:
+                    self.remover_username(username)
                     self.salvar_sucesso(username, senha, email, user_id, k2_token)
                     self.contas_criadas[email] = {
                         'username': username,
@@ -887,6 +974,10 @@ class XATAccountGenerator:
         
         if not self.carregar_emails():
             logger.error("❌ Falha ao carregar emails. Abortando...")
+            return False
+        
+        if not self.carregar_usernames():
+            logger.error("❌ Falha ao carregar usernames. Abortando...")
             return False
         
         if not self.carregar_proxies():
