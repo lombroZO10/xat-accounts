@@ -329,17 +329,16 @@ class XATAccountGenerator:
                 logger.warning(f"⚠️ Erro ao salvar usernames atualizados: {e}")
     
     def gerar_senha(self, tamanho_min: int = 8, tamanho_max: int = 16) -> str:
-        """Gera senha aleatória forte (maiúsculas, minúsculas, números, símbolos)"""
+        """Gera senha aleatória alfanumérica forte (maiúsculas, minúsculas, números)"""
         tamanho = random.randint(tamanho_min, tamanho_max)
         
         maiusculas = random.choice(string.ascii_uppercase)
         minusculas = random.choice(string.ascii_lowercase)
         numeros = random.choice(string.digits)
-        simbolos = random.choice('!@#$%^&*-_=+')
         
-        caracteres_restantes = string.ascii_letters + string.digits + '!@#$%^&*-_=+'
-        senha = [maiusculas, minusculas, numeros, simbolos]
-        senha += [random.choice(caracteres_restantes) for _ in range(tamanho - 4)]
+        caracteres_restantes = string.ascii_letters + string.digits
+        senha = [maiusculas, minusculas, numeros]
+        senha += [random.choice(caracteres_restantes) for _ in range(tamanho - 3)]
         
         random.shuffle(senha)
         return ''.join(senha)
@@ -597,7 +596,7 @@ class XATAccountGenerator:
         try:
             # Primeiro: Simular entrada no chat (equivalente ao usuário entrar no bate-papo)
             logger.info(f"🔗 Simulando entrada no chat para obter sessão...")
-            chat_url = f"{self.BASE_URL}/embed/chat.php?id=2"
+            chat_url = f"{self.BASE_URL}/chat.php?id=2"
             resposta_chat = self._fazer_requisicao('GET', chat_url)
             if resposta_chat:
                 logger.info("✅ Entrada no chat simulada com sucesso")
@@ -819,8 +818,7 @@ class XATAccountGenerator:
                 'agree': 'ON',
                 'password': senha,
                 'password2': senha,
-                'email': email,
-                'g-recaptcha-response': ''
+                'email': email
             }
 
             # Headers adicionais para fazer parecer um navegador real
