@@ -815,13 +815,13 @@ class XATAccountGenerator:
             headers = {
                 'Referer': f"{self.LOGIN_URL}?mode=1&UserId={user_id}&k2={k2_token}",
                 'Origin': self.BASE_URL,
-                'Content-Type': 'application/x-www-form-urlencoded',
+                'Content-Type': 'application/json',
                 'X-Requested-With': 'XMLHttpRequest',
                 'Accept': 'application/json, text/javascript, */*; q=0.01'
             }
 
             url_registro = f"{self.BASE_URL}/register"
-            resposta = self._fazer_requisicao('POST', url_registro, data=dados, headers=headers)
+            resposta = self._fazer_requisicao('POST', url_registro, json=dados, headers=headers)
 
             if not resposta:
                 logger.error("❌ Falha ao submeter formulário de cadastro. Possível proxy inválido, timeout ou bloqueio do servidor.")
