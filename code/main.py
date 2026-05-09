@@ -518,22 +518,48 @@ class XATAccountGenerator:
             if not resposta:
                 logger.error("❌ Falha ao acessar página de login")
                 return None
+
+            texto_resposta = self._decodificar_resposta(resposta)
             
-            # Extrair token k2
-            match = re.search(r'["\']?k2["\']?\s*[:=]\s*["\']([^"\']+)["\']', resposta.text)
-            if match:
-                k2_token = match.group(1)
-                logger.info(f"✅ Token k2 obtido: {k2_token[:20]}...")
+            if self.scraper and (resposta.status_code in [403, 503] or any(term in texto_resposta.lower() for term in ['checking your browser', 'cloudflare', 'cf-challenge', 'cf-browser-verification'])):
+                logger.warning("⚠️ Cloudflare ou bloqueio detectado na página de login; tentando fallback cloudscraper")
+                fallback = self._fazer_requisicao_com_cloudscraper('GET', url, headers=self.session.headers)
+                if fallback:
+                    texto_resposta = self._decodificar_resposta(fallback)
+
+            soup = BeautifulSoup(texto_resposta, 'html.parser')
+            input_k2 = soup.find('input', {'name': 'k2'}) or soup.find('input', {'id': 'k2'})
+            if input_k2 and input_k2.get('value'):
+                k2_token = input_k2['value']
+                logger.info(f"✅ Token k2 obtido de input hidden: {k2_token[:30]}...")
                 return k2_token
-            
-            # Tentar alternativa: buscar em data attributes
-            match = re.search(r'data-k2=["\']([^"\']+)["\']', resposta.text)
-            if match:
-                k2_token = match.group(1)
-                logger.info(f"✅ Token k2 obtido (alternativo): {k2_token[:20]}...")
-                return k2_token
-            
+
+            data_attr = soup.find(attrs={'data-k2': True})
+            if data_attr:
+                k2_token = data_attr.get('data-k2')
+                if k2_token:
+                    logger.info(f"✅ Token k2 obtido de data-k2: {k2_token[:30]}...")
+                    return k2_token
+
+            patterns = [
+                r'["\']?k2["\']?\s*[:=]\s*["\']([^"\']+)["\']',
+                r'k2\s*=\s*["\']([^"\']+)["\']',
+                r'k2\s*:\s*["\']([^"\']+)["\']',
+                r'data-k2=["\']([^"\']+)["\']',
+                r'k2["\']?\s*[:=]\s*([0-9a-zA-Z_-]{20,})'
+            ]
+
+            for pattern in patterns:
+                match = re.search(pattern, texto_resposta, re.IGNORECASE)
+                if match:
+                    k2_token = match.group(1)
+                    logger.info(f"✅ Token k2 obtido via regex ({pattern}): {k2_token[:30]}...")
+                    return k2_token
+
             logger.warning("⚠️ Token k2 não encontrado, tentando prosseguir sem ele")
+            if any(term in texto_resposta.lower() for term in ['recaptcha', 'g-recaptcha', 'h-captcha', 'captcha']):
+                logger.warning("⚠️ Parece haver um bloqueio de captcha na página de login")
+            logger.debug(f"Login HTML/JS inicial: {texto_resposta[:500]}")
             return ""
         
         except Exception as e:
@@ -569,27 +595,38 @@ class XATAccountGenerator:
             resposta = self._fazer_requisicao('POST', url_registro, data=dados, headers=headers)
 
             if not resposta:
-                logger.error("❌ Falha ao submeter formulário de cadastro")
+                logger.error("❌ Falha ao submeter formulário de cadastro. Possível proxy inválido, timeout ou bloqueio do servidor.")
                 return False
 
-            if self._detectar_recaptcha(resposta.text):
-                logger.warning(f"⚠️ reCAPTCHA detectado para {email}")
+            texto_resposta = self._decodificar_resposta(resposta)
+            if self._detectar_recaptcha(texto_resposta):
+                logger.warning(f"⚠️ reCAPTCHA detectado para {email}. Tentando identificar motivo e dados relevantes...")
+                sitekey = self._extrair_sitekey(texto_resposta)
+                if sitekey:
+                    logger.warning(f"⚠️ Sitekey encontrado: {sitekey}")
+                else:
+                    logger.warning("⚠️ Sitekey de reCAPTCHA não encontrado no HTML")
+
                 if self.config['captcha_solver'].get('enabled', False):
-                    sitekey = self._extrair_sitekey(resposta.text)
-                    if sitekey:
-                        token = self._resolver_recaptcha(sitekey, url_registro)
-                        if token:
-                            dados['g-recaptcha-response'] = token
-                            resposta = self._fazer_requisicao('POST', url_registro, data=dados, headers=headers)
-                            if resposta and not self._detectar_recaptcha(resposta.text):
+                    token = self._resolver_recaptcha(sitekey or '', url_registro)
+                    if token:
+                        dados['g-recaptcha-response'] = token
+                        resposta = self._fazer_requisicao('POST', url_registro, data=dados, headers=headers)
+                        if resposta:
+                            texto_resposta = self._decodificar_resposta(resposta)
+                            if not self._detectar_recaptcha(texto_resposta):
                                 logger.info("✅ reCAPTCHA resolvido via solver")
                                 return self._avaliar_resposta_criacao(resposta, username)
                             logger.warning("⚠️ reCAPTCHA ainda presente após solver")
                         else:
-                            logger.warning("⚠️ Solver de reCAPTCHA falhou")
+                            logger.warning("⚠️ Falha ao reenviar formulário após solver de reCAPTCHA")
                     else:
-                        logger.warning("⚠️ Não foi possível extrair sitekey de reCAPTCHA")
+                        logger.warning("⚠️ Solver de reCAPTCHA falhou ou retornou token inválido")
+                else:
+                    logger.warning("⚠️ Solver de reCAPTCHA não está habilitado na configuração")
+
                 logger.warning(f"⚠️ Não foi possível criar conta devido a reCAPTCHA para {email}")
+                logger.debug(f"Resposta de cadastro com recaptcha: {texto_resposta[:500]}")
                 return False
 
             return self._avaliar_resposta_criacao(resposta, username)
@@ -600,22 +637,34 @@ class XATAccountGenerator:
 
     def _avaliar_resposta_criacao(self, resposta: requests.Response, username: str) -> bool:
         """Avalia se a resposta indica sucesso ou falha na criação"""
-        texto = resposta.text.lower()
+        texto = self._decodificar_resposta(resposta)
+        texto_lower = texto.lower()
 
-        if any(palavra in texto for palavra in ['sucesso', 'success', 'criada com sucesso', 'account created', 'bem-vindo', 'welcome', 'confirme seu email']):
+        if any(palavra in texto_lower for palavra in ['sucesso', 'success', 'criada com sucesso', 'account created', 'bem-vindo', 'welcome', 'confirme seu email']):
             logger.info(f"✅ Conta criada com sucesso: {username}")
             return True
 
-        if any(palavra in texto for palavra in ['já existe', 'already exists', 'duplicado', 'duplicate']):
+        if any(palavra in texto_lower for palavra in ['já existe', 'already exists', 'duplicado', 'duplicate']):
             logger.warning(f"⚠️ Username já existe: {username}")
+            return False
+
+        if self._detectar_recaptcha(texto):
+            logger.warning(f"⚠️ reCAPTCHA detectado na resposta de criação da conta para {username}")
+            logger.debug(f"Resposta de criação com recaptcha: {texto[:500]}")
+            return False
+
+        if resposta.status_code in [403, 429, 503]:
+            logger.warning(f"⚠️ Resposta de criação inesperada com status {resposta.status_code} para {username}")
+            logger.debug(f"Resposta: {texto[:500]}")
             return False
 
         if resposta.status_code == 200:
             logger.info(f"✅ Resposta 200 OK - Conta possivelmente criada: {username}")
+            logger.debug(f"Resposta 200 de criação: {texto[:500]}")
             return True
 
-        logger.warning(f"⚠️ Resposta inesperada (status {resposta.status_code})")
-        logger.debug(f"Resposta: {resposta.text[:500]}")
+        logger.warning(f"⚠️ Resposta inesperada (status {resposta.status_code}) para {username}")
+        logger.debug(f"Resposta: {texto[:500]}")
         return False
 
     def _detectar_recaptcha(self, texto: str) -> bool:
@@ -704,11 +753,24 @@ class XATAccountGenerator:
                     partes = linha.strip().split('|')
                     if len(partes) >= 3:
                         email = partes[2]
+                        if len(partes) == 6:
+                            user_id = partes[3]
+                            k2_token = ''
+                            timestamp = partes[4]
+                            status = partes[5]
+                        else:
+                            user_id = partes[3]
+                            k2_token = partes[4]
+                            timestamp = partes[5] if len(partes) > 5 else ''
+                            status = partes[6] if len(partes) > 6 else 'sucesso'
+
                         self.contas_criadas[email] = {
                             'username': partes[0],
                             'email': email,
-                            'timestamp': partes[4] if len(partes) > 4 else '',
-                            'status': partes[5] if len(partes) > 5 else 'sucesso'
+                            'user_id': user_id,
+                            'k2': k2_token,
+                            'timestamp': timestamp,
+                            'status': status
                         }
             
             logger.info(f"✅ Carregadas {len(self.contas_criadas)} contas já criadas")
@@ -716,19 +778,21 @@ class XATAccountGenerator:
         except Exception as e:
             logger.error(f"❌ Erro ao carregar contas existentes: {e}")
     
-    def salvar_sucesso(self, username: str, senha: str, email: str, user_id: str, status: str = "sucesso"):
+    def salvar_sucesso(self, username: str, senha: str, email: str, user_id: str, k2_token: str = "", status: str = "sucesso"):
         """Salva conta criada com sucesso em success_criacao.txt"""
         try:
             DATA_DIR.mkdir(exist_ok=True)
             arquivo = DATA_DIR / 'success_criacao.txt'
             timestamp = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+            k2_field = k2_token if k2_token else ''
             
-            linha = f"{username}|{senha}|{email}|{user_id}|{timestamp}|{status}\n"
+            linha = f"{username}|{senha}|{email}|{user_id}|{k2_field}|{timestamp}|{status}\n"
             
             with open(arquivo, 'a', encoding='utf-8') as f:
                 f.write(linha)
             
-            logger.info(f"💾 Conta salva em success_criacao.txt")
+            k2_log = f" k2={k2_token[:30]}..." if k2_token else ''
+            logger.info(f"💾 Conta salva em success_criacao.txt{k2_log}")
         
         except Exception as e:
             logger.error(f"❌ Erro ao salvar conta: {e}")
@@ -783,12 +847,14 @@ class XATAccountGenerator:
                 sucesso = self.criar_conta(username, senha, email, user_id, k2_token)
                 
                 if sucesso:
-                    self.salvar_sucesso(username, senha, email, user_id)
+                    self.salvar_sucesso(username, senha, email, user_id, k2_token)
                     self.contas_criadas[email] = {
                         'username': username,
                         'email': email,
                         'user_id': user_id,
-                        'timestamp': datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+                        'k2': k2_token,
+                        'timestamp': datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
+                        'status': 'sucesso'
                     }
                 else:
                     logger.warning(f"⚠️ Falha ao criar conta para {email}")
