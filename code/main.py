@@ -325,6 +325,29 @@ class XATAccountGenerator:
         """Retorna o proxy atual"""
         return self.current_proxy
     
+    def _build_proxy_dict(self, proxy_str: str) -> Optional[Dict[str, str]]:
+        """Constrói um dicionário de proxy compatível com requests"""
+        if not proxy_str:
+            return None
+
+        proxy_url = proxy_str
+        if proxy_str.lower().startswith(('http://', 'https://', 'socks5://', 'socks4://')):
+            proxy_url = proxy_str
+        elif '@' in proxy_str:
+            partes = proxy_str.split(':')
+            if len(partes) == 4:
+                ip, porta, user, password = partes
+                proxy_url = f"http://{user}:{password}@{ip}:{porta}"
+            else:
+                proxy_url = f"http://{proxy_str}"
+        else:
+            proxy_url = f"http://{proxy_str}"
+
+        return {
+            'http': proxy_url,
+            'https': proxy_url
+        }
+    
     def _fazer_requisicao(self, method: str, url: str, force_direct: bool = False, **kwargs) -> Optional[requests.Response]:
         """Faz requisição HTTP com opção de acesso direto ou via proxy"""
         max_tentativas = self.config['retry'].get('max_tentativas', 3)
@@ -377,6 +400,58 @@ class XATAccountGenerator:
                 logger.warning(f"⚠️ Proxy atual falhou: {e}")
                 # Se proxy atual falhar, resetar e tentar outros
                 self._set_current_proxy(None)
+        
+        # Modo Tor exclusivo
+        if self.config['proxy'].get('rotacao') == 'tor_only':
+            tor_proxy = {'http': 'socks5://127.0.0.1:9050', 'https': 'socks5://127.0.0.1:9050'}
+            logger.info(f"🧅 Usando Tor para {url.split('/')[-1]}")
+            kwargs['proxies'] = tor_proxy
+            kwargs['timeout'] = self.config['timeout'].get('requisicao', 20)
+            
+            # Rotacionar User-Agent
+            self.session.headers['User-Agent'] = random.choice(self.USER_AGENTS)
+            
+            max_tor_attempts = 3
+            for attempt in range(max_tor_attempts):
+                try:
+                    if method.upper() == 'GET':
+                        resposta = self.session.get(url, **kwargs)
+                    elif method.upper() == 'POST':
+                        resposta = self.session.post(url, **kwargs)
+                    else:
+                        return None
+                    
+                    # Verificar bloqueios
+                    if resposta.status_code in [403, 503] or any(term in resposta.text.lower() for term in ['checking your browser', 'cloudflare', 'cf-challenge', 'cf-browser-verification']):
+                        logger.warning(f"⚠️ Bloqueio detectado com Tor (tentativa {attempt + 1}), tentando cloudscraper...")
+                        if self.scraper:
+                            scraper_kwargs = {k: v for k, v in kwargs.items() if k != 'proxies'}
+                            scraper_kwargs['proxies'] = tor_proxy
+                            scraper_response = self._fazer_requisicao_com_cloudscraper(method, url, **scraper_kwargs)
+                            if scraper_response:
+                                return scraper_response
+                        if attempt < max_tor_attempts - 1:
+                            logger.info("🔄 Renovando circuito Tor...")
+                            # Tentar renovar circuito Tor
+                            import subprocess
+                            try:
+                                subprocess.run(['sudo', 'killall', '-HUP', 'tor'], capture_output=True)
+                                time.sleep(3)
+                            except:
+                                pass
+                            time.sleep(2)
+                        continue
+                    
+                    resposta.raise_for_status()
+                    self._set_current_proxy(tor_proxy)  # Manter Tor como proxy atual
+                    return resposta
+                    
+                except Exception as e:
+                    logger.warning(f"⚠️ Tor falhou (tentativa {attempt + 1}/{max_tor_attempts}): {e}")
+                    if attempt < max_tor_attempts - 1:
+                        time.sleep(2)
+            
+            return None
         
         # Lógica original de rotação de proxies
         proxy_groups = []
@@ -645,6 +720,7 @@ class XATAccountGenerator:
                                 break
                             else:
                                 logger.warning(f"⚠️ Mesmo com cloudscraper, bloqueio persiste (tentativa {attempt + 1})")
+                                logger.debug(f"Conteúdo suspeito: {texto_resposta[:300]}...")
                                 if attempt < max_cloudflare_attempts - 1:
                                     sleep_time = 5 + attempt * 2  # 5s, 7s, 9s
                                     logger.info(f"⏳ Aguardando {sleep_time}s antes de tentar novamente...")

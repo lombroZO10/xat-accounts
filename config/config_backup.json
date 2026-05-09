@@ -23,9 +23,9 @@
     "tamanho_max": 16
   },
   "proxy": {
-    "rotacao": "tor_only",
-    "health_check": false,
-    "use_public_fallback": false,
+    "rotacao": "por_sessao",
+    "health_check": true,
+    "use_public_fallback": true,
     "force_proxy": true,
     "skip_for_endpoints": []
   },
