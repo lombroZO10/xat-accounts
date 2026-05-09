@@ -26,7 +26,8 @@
     "rotacao": "por_requisicao",
     "health_check": true,
     "use_public_fallback": true,
-    "skip_for_endpoints": ["/login"]
+    "force_proxy": true,
+    "skip_for_endpoints": []
   },
   "captcha_solver": {
     "enabled": false,
