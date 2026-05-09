@@ -225,22 +225,14 @@ class XATAccountGenerator:
             return False
     
     def carregar_proxies(self) -> bool:
-        """Carrega proxies pagos e proxies públicos"""
+        """Carrega proxies pagos (apenas proxies pagos são usados)"""
         self.paid_proxies = self._load_proxy_file(DATA_DIR / 'proxies.txt')
-        self.public_proxies = self._load_proxy_file(DATA_DIR / 'public_proxies.txt')
 
-        if not self.paid_proxies and not self.public_proxies:
-            logger.error("❌ Nenhum proxy encontrado em proxies.txt ou public_proxies.txt")
+        if not self.paid_proxies:
+            logger.error("❌ Nenhum proxy pago encontrado em proxies.txt")
             return False
 
-        if self.paid_proxies:
-            logger.info(f"✅ Carregados {len(self.paid_proxies)} proxies pagos")
-        else:
-            logger.warning("⚠️ Nenhum proxy pago encontrado; usando apenas proxies públicos")
-
-        if self.public_proxies:
-            logger.info(f"✅ Carregados {len(self.public_proxies)} proxies públicos")
-
+        logger.info(f"✅ Carregados {len(self.paid_proxies)} proxies pagos")
         return True
 
     def _load_proxy_file(self, arquivo: Path) -> List[str]:
@@ -258,6 +250,54 @@ class XATAccountGenerator:
         except Exception as e:
             logger.warning(f"⚠️ Erro ao carregar proxies de {arquivo}: {e}")
             return []
+    
+    def _validar_proxies(self) -> None:
+        """Valida proxies pagos testando conectividade"""
+        if not self.paid_proxies:
+            logger.warning("⚠️ Nenhum proxy para validar")
+            return
+        
+        logger.info(f"🔍 Iniciando validação de {len(self.paid_proxies)} proxies pagos...")
+        
+        proxies_validos = []
+        total = len(self.paid_proxies)
+        
+        for i, proxy_str in enumerate(self.paid_proxies, 1):
+            logger.info(f"🔍 Testando proxy {i}/{total}")
+            
+            try:
+                proxy_dict = self._build_proxy_dict(proxy_str)
+                if not proxy_dict:
+                    continue
+                
+                # Teste rápido com httpbin.org/ip
+                response = requests.get(
+                    'https://httpbin.org/ip',
+                    proxies=proxy_dict,
+                    timeout=10,
+                    headers={'User-Agent': random.choice(self.USER_AGENTS)}
+                )
+                
+                if response.status_code == 200:
+                    # Verificar se retornou um IP válido
+                    data = response.json()
+                    origin_ip = data.get('origin', '').split(',')[0].strip()
+                    if origin_ip and len(origin_ip.split('.')) == 4:
+                        proxies_validos.append(proxy_str)
+                        logger.info(f"✅ Proxy válido: {origin_ip}")
+                    else:
+                        logger.warning(f"❌ Proxy inválido (resposta inesperada): {proxy_str}")
+                else:
+                    logger.warning(f"❌ Proxy inválido (status {response.status_code}): {proxy_str}")
+                    
+            except Exception as e:
+                logger.warning(f"❌ Proxy falhou ({str(e)[:50]}...): {proxy_str}")
+            
+            # Pequena pausa para não sobrecarregar
+            time.sleep(0.5)
+        
+        self.paid_proxies = proxies_validos
+        logger.info(f"✅ Validação concluída: {len(proxies_validos)}/{total} proxies válidos")
     
     def _validar_email(self, email: str) -> bool:
         """Valida formato básico de email"""
@@ -319,6 +359,12 @@ class XATAccountGenerator:
 
     def _set_current_proxy(self, proxy_dict: Optional[Dict[str, str]]):
         """Define o proxy atual para manter sessão consistente"""
+        if proxy_dict:
+            proxy_url = proxy_dict.get('http', '')
+            from urllib.parse import urlparse
+            parsed = urlparse(proxy_url)
+            proxy_ip = parsed.hostname or 'unknown'
+            logger.info(f"🔄 Proxy da sessão definido: {proxy_ip}")
         self.current_proxy = proxy_dict
     
     def _get_current_proxy(self) -> Optional[Dict[str, str]]:
@@ -404,17 +450,12 @@ class XATAccountGenerator:
         proxy_groups = []
         if self.paid_proxies:
             proxy_groups.append('paid')
-        if self.public_proxies and (use_public_fallback or not self.paid_proxies):
-            proxy_groups.append('public')
 
         if not proxy_groups:
-            logger.error("❌ Nenhum proxy disponível para requisição")
+            logger.error("❌ Nenhum proxy pago disponível para requisição")
             return None
 
         for proxy_type in proxy_groups:
-            if proxy_type == 'public':
-                logger.info("🔄 Tentando proxies públicos como fallback")
-
             for tentativa in range(max_tentativas):
                 try:
                     proxy = self._obter_proxy(proxy_type)
@@ -1185,6 +1226,13 @@ class XATAccountGenerator:
         
         if not self.carregar_proxies():
             logger.error("❌ Falha ao carregar proxies. Abortando...")
+            return False
+        
+        # Validar proxies pagos
+        self._validar_proxies()
+        
+        if not self.paid_proxies:
+            logger.error("❌ Nenhum proxy válido encontrado. Abortando...")
             return False
         
         if not self.emails:
