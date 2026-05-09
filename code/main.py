@@ -261,9 +261,12 @@ class XATAccountGenerator:
         
         proxies_validos = []
         total = len(self.paid_proxies)
+        proxies_para_validar = self.paid_proxies[:15]
+        if len(self.paid_proxies) > 15:
+            logger.info(f"ℹ️ Validando apenas os primeiros 15 proxies pagos por enquanto")
         
-        for i, proxy_str in enumerate(self.paid_proxies, 1):
-            logger.info(f"🔍 Testando proxy {i}/{total}")
+        for i, proxy_str in enumerate(proxies_para_validar, 1):
+            logger.info(f"🔍 Testando proxy {i}/{len(proxies_para_validar)}")
             
             try:
                 proxy_dict = self._build_proxy_dict(proxy_str)
@@ -799,29 +802,28 @@ class XATAccountGenerator:
 
             # Preparar dados do formulário
             dados = {
+                'Register': 1,
+                'UserId': user_id,
+                'k2': k2_token,
                 'Username': username,
+                'agree': 'ON',
                 'password': senha,
                 'password2': senha,
                 'email': email,
-                'YourEmail': email,
-                'NameEmail': email,
-                'agree': 'ON',
-                'Register': 1,
-                'UserId': user_id,
-                'k2': k2_token
+                'g-recaptcha-response': ''
             }
 
             # Headers adicionais para fazer parecer um navegador real
             headers = {
                 'Referer': f"{self.LOGIN_URL}?mode=1&UserId={user_id}&k2={k2_token}",
                 'Origin': self.BASE_URL,
-                'Content-Type': 'application/json',
+                'Content-Type': 'application/x-www-form-urlencoded',
                 'X-Requested-With': 'XMLHttpRequest',
                 'Accept': 'application/json, text/javascript, */*; q=0.01'
             }
 
             url_registro = f"{self.BASE_URL}/register"
-            resposta = self._fazer_requisicao('POST', url_registro, json=dados, headers=headers)
+            resposta = self._fazer_requisicao('POST', url_registro, data=dados, headers=headers)
 
             if not resposta:
                 logger.error("❌ Falha ao submeter formulário de cadastro. Possível proxy inválido, timeout ou bloqueio do servidor.")
