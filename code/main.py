@@ -94,6 +94,7 @@ class XATAccountGenerator:
         self.config = self._carregar_config()
         self.session = self._criar_sessao()
         self.scraper = self._criar_scraper()
+        self.current_proxy = None  # Proxy atual para manter sessão
         
         logger.info("🚀 XAT Account Generator iniciado")
 
@@ -316,28 +317,13 @@ class XATAccountGenerator:
             logger.warning(f"⚠️ Erro ao processar proxy {proxy_str}: {e}")
             return None
 
-    def _build_proxy_dict(self, proxy_str: str) -> Optional[Dict[str, str]]:
-        """Constrói um dicionário de proxy compatível com requests"""
-        if not proxy_str:
-            return None
-
-        proxy_url = proxy_str
-        if proxy_str.lower().startswith(('http://', 'https://', 'socks5://', 'socks4://')):
-            proxy_url = proxy_str
-        elif '@' in proxy_str:
-            partes = proxy_str.split(':')
-            if len(partes) == 4:
-                ip, porta, user, password = partes
-                proxy_url = f"http://{user}:{password}@{ip}:{porta}"
-            else:
-                proxy_url = f"http://{proxy_str}"
-        else:
-            proxy_url = f"http://{proxy_str}"
-
-        return {
-            'http': proxy_url,
-            'https': proxy_url
-        }
+    def _set_current_proxy(self, proxy_dict: Optional[Dict[str, str]]):
+        """Define o proxy atual para manter sessão consistente"""
+        self.current_proxy = proxy_dict
+    
+    def _get_current_proxy(self) -> Optional[Dict[str, str]]:
+        """Retorna o proxy atual"""
+        return self.current_proxy
     
     def _fazer_requisicao(self, method: str, url: str, force_direct: bool = False, **kwargs) -> Optional[requests.Response]:
         """Faz requisição HTTP com opção de acesso direto ou via proxy"""
@@ -356,6 +342,43 @@ class XATAccountGenerator:
             logger.info(f"🔓 Acessando {url.split('/')[-1]} sem proxy (acesso direto)")
             return self._fazer_requisicao_direto(method, url, **kwargs)
         
+        # Usar proxy atual se definido (para manter sessão)
+        current_proxy = self._get_current_proxy()
+        if current_proxy:
+            logger.info(f"🔄 Usando proxy atual da sessão para {url.split('/')[-1]}")
+            kwargs['proxies'] = current_proxy
+            kwargs['timeout'] = self.config['timeout'].get('requisicao', 20)
+            
+            # Rotacionar User-Agent
+            self.session.headers['User-Agent'] = random.choice(self.USER_AGENTS)
+            
+            try:
+                if method.upper() == 'GET':
+                    resposta = self.session.get(url, **kwargs)
+                elif method.upper() == 'POST':
+                    resposta = self.session.post(url, **kwargs)
+                else:
+                    return None
+                
+                # Verificar bloqueios
+                if resposta.status_code in [403, 503] or any(term in resposta.text.lower() for term in ['checking your browser', 'cloudflare', 'cf-challenge', 'cf-browser-verification']):
+                    logger.warning(f"⚠️ Bloqueio detectado com proxy atual, tentando cloudscraper...")
+                    if self.scraper:
+                        scraper_kwargs = {k: v for k, v in kwargs.items() if k != 'proxies'}
+                        scraper_kwargs['proxies'] = current_proxy
+                        scraper_response = self._fazer_requisicao_com_cloudscraper(method, url, **scraper_kwargs)
+                        if scraper_response:
+                            return scraper_response
+                
+                resposta.raise_for_status()
+                return resposta
+                
+            except Exception as e:
+                logger.warning(f"⚠️ Proxy atual falhou: {e}")
+                # Se proxy atual falhar, resetar e tentar outros
+                self._set_current_proxy(None)
+        
+        # Lógica original de rotação de proxies
         proxy_groups = []
         if self.paid_proxies:
             proxy_groups.append('paid')
@@ -404,6 +427,8 @@ class XATAccountGenerator:
                         continue
 
                     resposta.raise_for_status()
+                    # Se sucesso, definir como proxy atual para próximas requisições
+                    self._set_current_proxy(proxy)
                     return resposta
 
                 except requests.exceptions.ProxyError:
@@ -602,24 +627,42 @@ class XATAccountGenerator:
                 if has_blocked:
                     logger.debug("'blocked' encontrado na resposta")
 
-                # Tentar uma última vez com cloudscraper se ainda não foi usado
-                if self.scraper and resposta != self._fazer_requisicao_com_cloudscraper('GET', url, headers=self.session.headers):
-                    logger.warning("🔄 Tentando novamente com cloudscraper...")
-                    resposta = self._fazer_requisicao_com_cloudscraper('GET', url, headers=self.session.headers)
-                    if resposta:
-                        texto_resposta = self._decodificar_resposta(resposta)
-                        # Verificar novamente se o bloqueio foi resolvido
-                        new_found_terms = [term for term in block_terms if term in texto_resposta.lower()]
-                        new_has_cloudflare = 'cloudflare' in texto_resposta.lower()
-                        new_has_blocked = 'blocked' in texto_resposta.lower() or 'bloqueado' in texto_resposta.lower()
+                # Tentar múltiplas vezes com cloudscraper se ainda não foi usado
+                max_cloudflare_attempts = 3
+                for attempt in range(max_cloudflare_attempts):
+                    if self.scraper and resposta != self._fazer_requisicao_com_cloudscraper('GET', url, headers=self.session.headers):
+                        logger.warning(f"🔄 Tentando novamente com cloudscraper (tentativa {attempt + 1}/{max_cloudflare_attempts})...")
+                        resposta = self._fazer_requisicao_com_cloudscraper('GET', url, headers=self.session.headers)
+                        if resposta:
+                            texto_resposta = self._decodificar_resposta(resposta)
+                            # Verificar novamente se o bloqueio foi resolvido
+                            new_found_terms = [term for term in block_terms if term in texto_resposta.lower()]
+                            new_has_cloudflare = 'cloudflare' in texto_resposta.lower()
+                            new_has_blocked = 'blocked' in texto_resposta.lower() or 'bloqueado' in texto_resposta.lower()
 
-                        if not new_found_terms and not (new_has_cloudflare and new_has_blocked):
-                            logger.info("✅ Cloudscraper resolveu o bloqueio!")
+                            if not new_found_terms and not (new_has_cloudflare and new_has_blocked):
+                                logger.info("✅ Cloudscraper resolveu o bloqueio!")
+                                break
+                            else:
+                                logger.warning(f"⚠️ Mesmo com cloudscraper, bloqueio persiste (tentativa {attempt + 1})")
+                                if attempt < max_cloudflare_attempts - 1:
+                                    sleep_time = 5 + attempt * 2  # 5s, 7s, 9s
+                                    logger.info(f"⏳ Aguardando {sleep_time}s antes de tentar novamente...")
+                                    time.sleep(sleep_time)
                         else:
-                            logger.warning("⚠️ Mesmo com cloudscraper, bloqueio persiste")
-                            logger.warning("💡 Solução: Use proxy residencial ou aguarde desbloqueio do IP")
-                            return None
+                            logger.warning(f"⚠️ Cloudscraper falhou na tentativa {attempt + 1}")
                     else:
+                        break
+                
+                # Verificar final se ainda há bloqueio
+                if resposta:
+                    final_texto = self._decodificar_resposta(resposta)
+                    final_found_terms = [term for term in block_terms if term in final_texto.lower()]
+                    final_has_cloudflare = 'cloudflare' in final_texto.lower()
+                    final_has_blocked = 'blocked' in final_texto.lower() or 'bloqueado' in final_texto.lower()
+                    
+                    if final_found_terms or (final_has_cloudflare and final_has_blocked):
+                        logger.warning("💡 Solução: Use proxy residencial ou aguarde desbloqueio do IP")
                         return None
                 else:
                     return None
@@ -971,6 +1014,9 @@ class XATAccountGenerator:
             try:
                 logger.info(f"\n📧 Processando: {idx}/{total} - {email}")
                 
+                # Resetar proxy atual para nova conta (manter sessão consistente)
+                self._set_current_proxy(None)
+                
                 # Gerar dados da conta
                 username = self.gerar_username()
                 if not username:
@@ -992,7 +1038,7 @@ class XATAccountGenerator:
                 logger.info(f"⏳ Aguardando {delay:.1f}s entre requisições...")
                 time.sleep(delay)
                 
-                # PASSO 2: Acessar página de login
+                # PASSO 2: Acessar página de login (usando mesmo proxy da sessão)
                 k2_token = self.acessar_pagina_login(user_id)
                 if k2_token is None:
                     logger.error(f"❌ Falha ao acessar login para {email}")
@@ -1006,7 +1052,7 @@ class XATAccountGenerator:
                 logger.info(f"⏳ Aguardando {delay:.1f}s entre requisições...")
                 time.sleep(delay)
                 
-                # PASSO 3 e 4: Criar conta
+                # PASSO 3 e 4: Criar conta (usando mesmo proxy da sessão)
                 sucesso = self.criar_conta(username, senha, email, user_id, k2_token)
                 
                 if sucesso:

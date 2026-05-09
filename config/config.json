@@ -1,18 +1,18 @@
 {
   "delays": {
-    "min_entre_requisicoes": 5,
-    "max_entre_requisicoes": 10,
-    "min_entre_contas": 10,
-    "max_entre_contas": 20,
-    "apos_429": 30
+    "min_entre_requisicoes": 20,
+    "max_entre_requisicoes": 40,
+    "min_entre_contas": 120,
+    "max_entre_contas": 300,
+    "apos_429": 60
   },
   "timeout": {
-    "requisicao": 15,
-    "proxy": 10
+    "requisicao": 25,
+    "proxy": 15
   },
   "retry": {
-    "max_tentativas": 3,
-    "delay_entre_tentativas": 1
+    "max_tentativas": 5,
+    "delay_entre_tentativas": 3
   },
   "username": {
     "tamanho_min": 10,
@@ -23,7 +23,7 @@
     "tamanho_max": 16
   },
   "proxy": {
-    "rotacao": "por_requisicao",
+    "rotacao": "por_sessao",
     "health_check": true,
     "use_public_fallback": true,
     "force_proxy": true,
