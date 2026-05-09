@@ -600,20 +600,27 @@ class XATAccountGenerator:
             logger.error(f"❌ Erro ao obter dados de auser3.php: {e}")
             return None
 
-    def acessar_pagina_login(self, user_id: str) -> Optional[str]:
+    def acessar_pagina_login(self, user_id: str, k2_token: str = "") -> Optional[str]:
         """
-        PASSO 2: Acessar página login para extrair token k2
-        Retorna o token k2
+        PASSO 2: Acessar página login para extrair token k2 e preparar sessão
+        Retorna o token k2 ou string vazia se a página for carregada corretamente mas k2 não estiver no HTML.
         """
         try:
             url = f"{self.LOGIN_URL}?mode=1&UserId={user_id}"
-            logger.info(f"🔗 Acessando página de login com UserId: {user_id}")
+            if k2_token:
+                url = f"{url}&k2={k2_token}"
+            logger.info(f"🔗 Acessando página de login com UserId: {user_id} k2={k2_token[:30]}...")
 
-            # Tentar primeiro com cloudscraper se disponível
+            headers = dict(self.session.headers)
+            headers.update({
+                'Referer': f"{self.LOGIN_URL}?mode=1&UserId={user_id}",
+                'Origin': self.BASE_URL,
+            })
+
             resposta = None
             if self.scraper:
                 logger.info("🔄 Tentando acesso com cloudscraper primeiro")
-                resposta = self._fazer_requisicao_com_cloudscraper('GET', url, headers=self.session.headers)
+                resposta = self._fazer_requisicao_com_cloudscraper('GET', url, headers=headers)
                 if resposta and resposta.status_code == 200:
                     logger.info("✅ Acesso com cloudscraper bem-sucedido")
                 else:
@@ -621,7 +628,7 @@ class XATAccountGenerator:
 
             # Fallback para requests normal se cloudscraper falhou ou não está disponível
             if not resposta or resposta.status_code != 200:
-                resposta = self._fazer_requisicao('GET', url)
+                resposta = self._fazer_requisicao('GET', url, headers=headers)
 
             if not resposta:
                 logger.error("❌ Falha ao acessar página de login")
@@ -638,38 +645,32 @@ class XATAccountGenerator:
                 'security error', 'erro de segurança', 'protection mode', 'modo de proteção'
             ]
 
-            # Só considerar bloqueio se múltiplos indicadores estiverem presentes
-            found_terms = [term for term in block_terms if term in texto_resposta.lower()]
-            has_cloudflare = 'cloudflare' in texto_resposta.lower()
-            has_blocked = 'blocked' in texto_resposta.lower() or 'bloqueado' in texto_resposta.lower()
-
-            if found_terms or (has_cloudflare and has_blocked):
-                logger.warning(f"⚠️ Bloqueio ou proteção detectada na página de login para UserId {user_id}")
-                logger.debug(f"Indicadores encontrados: {found_terms}")
-                if has_cloudflare:
-                    logger.debug("Cloudflare detectado na resposta")
-                if has_blocked:
-                    logger.debug("'blocked' encontrado na resposta")
-
-                # Tentar múltiplas vezes com cloudscraper se ainda não foi usado
+            # Verificar por bloqueios claros
+            texto_lower = texto_resposta.lower()
+            found_clear_blocks = [term for term in block_terms if term in texto_lower]
+            
+            # Se encontrou bloqueios claros, considerar como bloqueado
+            if found_clear_blocks:
+                logger.warning(f"⚠️ Bloqueio detectado na página de login para UserId {user_id}")
+                logger.debug(f"Indicadores de bloqueio encontrados: {found_clear_blocks}")
+                
+                # Tentar múltiplas vezes com cloudscraper
                 max_cloudflare_attempts = 3
                 for attempt in range(max_cloudflare_attempts):
-                    if self.scraper and resposta != self._fazer_requisicao_com_cloudscraper('GET', url, headers=self.session.headers):
+                    if self.scraper:
                         logger.warning(f"🔄 Tentando novamente com cloudscraper (tentativa {attempt + 1}/{max_cloudflare_attempts})...")
                         resposta = self._fazer_requisicao_com_cloudscraper('GET', url, headers=self.session.headers)
                         if resposta:
                             texto_resposta = self._decodificar_resposta(resposta)
+                            texto_lower = texto_resposta.lower()
                             # Verificar novamente se o bloqueio foi resolvido
-                            new_found_terms = [term for term in block_terms if term in texto_resposta.lower()]
-                            new_has_cloudflare = 'cloudflare' in texto_resposta.lower()
-                            new_has_blocked = 'blocked' in texto_resposta.lower() or 'bloqueado' in texto_resposta.lower()
-
-                            if not new_found_terms and not (new_has_cloudflare and new_has_blocked):
+                            new_found_blocks = [term for term in block_terms if term in texto_lower]
+                            
+                            if not new_found_blocks:
                                 logger.info("✅ Cloudscraper resolveu o bloqueio!")
                                 break
                             else:
-                                logger.warning(f"⚠️ Mesmo com cloudscraper, bloqueio persiste (tentativa {attempt + 1})")
-                                logger.debug(f"Conteúdo suspeito: {texto_resposta[:300]}...")
+                                logger.warning(f"⚠️ Bloqueio ainda persiste (tentativa {attempt + 1})")
                                 if attempt < max_cloudflare_attempts - 1:
                                     sleep_time = 5 + attempt * 2  # 5s, 7s, 9s
                                     logger.info(f"⏳ Aguardando {sleep_time}s antes de tentar novamente...")
@@ -682,23 +683,32 @@ class XATAccountGenerator:
                 # Verificar final se ainda há bloqueio
                 if resposta:
                     final_texto = self._decodificar_resposta(resposta)
-                    final_found_terms = [term for term in block_terms if term in final_texto.lower()]
-                    final_has_cloudflare = 'cloudflare' in final_texto.lower()
-                    final_has_blocked = 'blocked' in final_texto.lower() or 'bloqueado' in final_texto.lower()
+                    final_lower = final_texto.lower()
+                    final_blocks = [term for term in block_terms if term in final_lower]
                     
-                    if final_found_terms or (final_has_cloudflare and final_has_blocked):
+                    if final_blocks:
                         logger.warning("💡 Solução: Use proxy residencial ou aguarde desbloqueio do IP")
                         return None
                 else:
                     return None
 
             soup = BeautifulSoup(texto_resposta, 'html.parser')
+            
+            # ✅ Se encontrar formulário de login/registro, a página é válida
+            login_forms = soup.find_all('form')
+            has_login_form = any('login' in str(form).lower() or 'register' in str(form).lower() for form in login_forms)
+            
+            if has_login_form or soup.find('input', {'name': 'username'}) or soup.find('input', {'type': 'password'}):
+                logger.info(f"✅ Página de login válida encontrada para UserId {user_id}")
+            
+            # Tentar extrair k2 de input hidden
             input_k2 = soup.find('input', {'name': 'k2'}) or soup.find('input', {'id': 'k2'})
             if input_k2 and input_k2.get('value'):
                 k2_token = input_k2['value']
                 logger.info(f"✅ Token k2 obtido de input hidden: {k2_token[:30]}...")
                 return k2_token
 
+            # Tentar extrair k2 de atributo data
             data_attr = soup.find(attrs={'data-k2': True})
             if data_attr:
                 k2_token = data_attr.get('data-k2')
@@ -706,6 +716,7 @@ class XATAccountGenerator:
                     logger.info(f"✅ Token k2 obtido de data-k2: {k2_token[:30]}...")
                     return k2_token
 
+            # Tentar extrair k2 por regex
             patterns = [
                 r'["\']?k2["\']?\s*[:=]\s*["\']([^"\']+)["\']',
                 r'k2\s*=\s*["\']([^"\']+)["\']',
@@ -718,10 +729,17 @@ class XATAccountGenerator:
                 match = re.search(pattern, texto_resposta, re.IGNORECASE)
                 if match:
                     k2_token = match.group(1)
-                    logger.info(f"✅ Token k2 obtido via regex ({pattern}): {k2_token[:30]}...")
+                    logger.info(f"✅ Token k2 obtido via regex: {k2_token[:30]}...")
                     return k2_token
 
-            logger.warning("⚠️ Token k2 não encontrado, tentando prosseguir sem ele")
+            # Se encontrou o formulário mas não o k2, é possível que o k2 seja gerado por JS
+            if has_login_form:
+                logger.warning("⚠️ Formulário encontrado mas k2 não extraído - pode ser gerado por JavaScript")
+                logger.debug(f"Conteúdo da página (primeiros 1000 chars): {texto_resposta[:1000]}")
+                # Retornar string vazia para permitir prosseguir
+                return ""
+            
+            logger.warning("⚠️ Token k2 não encontrado na página")
             if any(term in texto_resposta.lower() for term in ['recaptcha', 'g-recaptcha', 'h-captcha', 'captcha']):
                 logger.warning("⚠️ Parece haver um bloqueio de captcha na página de login")
             logger.debug(f"Login HTML/JS inicial: {texto_resposta[:500]}")
@@ -740,18 +758,27 @@ class XATAccountGenerator:
 
             # Preparar dados do formulário
             dados = {
-                'username': username,
+                'Username': username,
                 'password': senha,
+                'password2': senha,
                 'email': email,
+                'YourEmail': email,
+                'NameEmail': email,
+                'agree': 'ON',
+                'Register': 1,
                 'UserId': user_id,
+                'k2': k2_token,
+                'json': json.dumps({
+                    'name': username,
+                    'password': senha,
+                    'email': email,
+                    'NameEmail': email
+                })
             }
-
-            if k2_token:
-                dados['k2'] = k2_token
 
             # Headers adicionais para fazer parecer um navegador real
             headers = {
-                'Referer': f"{self.LOGIN_URL}?mode=1&UserId={user_id}",
+                'Referer': f"{self.LOGIN_URL}?mode=1&UserId={user_id}&k2={k2_token}",
                 'Origin': self.BASE_URL,
                 'Content-Type': 'application/x-www-form-urlencoded'
             }
@@ -1068,13 +1095,13 @@ class XATAccountGenerator:
 
                 # PASSO 2: Acessar página de login para preparar sessão (SEMPRE necessário)
                 logger.info(f"🔗 Preparando sessão de login com UserId: {user_id}")
-                k2_token = self.acessar_pagina_login(user_id)
+                k2_token = self.acessar_pagina_login(user_id, k2_token_initial)
                 if k2_token is None:
                     logger.error(f"❌ Falha ao acessar página de login para {email}")
                     continue
 
                 if not k2_token and k2_token_initial:
-                    logger.warning(f"⚠️ Usando k2 original de auser3.php como fallback")
+                    logger.info(f"ℹ️ Usando k2 de auser3.php porque a página não retornou um token novo")
                     k2_token = k2_token_initial
                 elif not k2_token:
                     logger.warning(f"⚠️ Nenhum k2 disponível, tentando prosseguir sem ele")
