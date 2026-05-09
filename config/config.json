@@ -30,8 +30,8 @@
     "skip_for_endpoints": []
   },
   "captcha_solver": {
-    "enabled": false,
+    "enabled": true,
     "provider": "2captcha",
-    "api_key": ""
+    "api_key": "43bb17975c66bf9621255da7c30eadad"
   }
 }
