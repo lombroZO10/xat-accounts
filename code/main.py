@@ -1620,43 +1620,88 @@ class XATBrowserAutomation:
             logger.info("🔗 Obtendo UserID/k2 via navegador")
 
             # Acessar auser3.php
-            await page.goto(self.AUSER_URL, wait_until='networkidle')
+            response = await page.goto(self.AUSER_URL, wait_until='networkidle')
+            
+            if response and response.status in [403, 503]:
+                logger.warning(f"⚠️ Bloqueio detectado ao acessar auser3.php: {response.status}")
+                self._blacklist_current_proxy(f"Bloqueio 403/503 em auser3.php")
+                return None
 
-            # Extrair dados da resposta
+            # Extrair conteúdo HTML
             content = await page.content()
             soup = BeautifulSoup(content, 'html.parser')
 
-            # Procurar por dados JSON na página
-            scripts = soup.find_all('script')
-            for script in scripts:
-                if script.string and 'UserId' in script.string:
-                    # Extrair JSON da resposta
-                    match = re.search(r'(\{.*\})', script.string)
-                    if match:
-                        data = json.loads(match.group(1))
-                        user_id = data.get('UserId')
-                        k2 = data.get('k2')
-                        if user_id and k2:
-                            logger.info(f"✅ UserData obtido: UserId={user_id} k2={k2[:30]}...")
-                            return {'UserId': user_id, 'k2': k2}
+            # Procurar por inputs hidden com name="UserId" ou similar
+            user_id = None
+            k2 = None
 
-            # Fallback: tentar extrair do conteúdo da página
-            try:
-                text_content = await page.text_content('body')
-            except:
-                text_content = ""
-            
-            if text_content:
-                user_id_match = re.search(r'UserId["\s:]+(\d+)', text_content)
-                k2_match = re.search(r'k2["\s:]+([a-zA-Z0-9]+)', text_content)
+            # Método 1: Procurar em inputs hidden
+            for input_tag in soup.find_all('input', {'type': 'hidden'}):
+                name = input_tag.get('name', '').lower()
+                value = input_tag.get('value', '')
+                
+                if 'userid' in name and value:
+                    user_id = value
+                    logger.info(f"✅ UserID encontrado em input hidden: {value}")
+                elif name == 'k2' and value:
+                    k2 = value
+                    logger.info(f"✅ k2 encontrado em input hidden: {value[:30]}...")
 
-                if user_id_match and k2_match:
-                    user_id = user_id_match.group(1)
-                    k2 = k2_match.group(1)
-                    logger.info(f"✅ UserData extraído: UserId={user_id} k2={k2[:30]}...")
-                    return {'UserId': user_id, 'k2': k2}
+            # Método 2: Procurar em scripts/divs com atributos data-
+            if not user_id or not k2:
+                for tag in soup.find_all(['script', 'div']):
+                    content_text = tag.get_text() if hasattr(tag, 'get_text') else str(tag)
+                    
+                    if 'UserId' in content_text and not user_id:
+                        match = re.search(r'UserId["\s:]+(\d+)', content_text)
+                        if match:
+                            user_id = match.group(1)
+                            logger.info(f"✅ UserID extraído do conteúdo: {user_id}")
+                    
+                    if 'k2' in content_text and not k2:
+                        match = re.search(r'k2["\s:=]+([a-zA-Z0-9_-]+)', content_text)
+                        if match:
+                            k2 = match.group(1)
+                            logger.info(f"✅ k2 extraído do conteúdo: {k2[:30]}...")
+
+            # Método 3: Via JavaScript (última opção)
+            if not user_id or not k2:
+                try:
+                    js_user_id = await page.evaluate("""
+                        () => {
+                            let val = document.querySelector('input[name="UserId"]')?.value || 
+                                     document.querySelector('[data-userid]')?.getAttribute('data-userid') ||
+                                     window.UserId || null;
+                            return val;
+                        }
+                    """)
+                    if js_user_id:
+                        user_id = str(js_user_id)
+                        logger.info(f"✅ UserID extraído via JavaScript: {user_id}")
+                except:
+                    pass
+                
+                try:
+                    js_k2 = await page.evaluate("""
+                        () => {
+                            let val = document.querySelector('input[name="k2"]')?.value || 
+                                     document.querySelector('[data-k2]')?.getAttribute('data-k2') ||
+                                     window.k2 || null;
+                            return val;
+                        }
+                    """)
+                    if js_k2:
+                        k2 = str(js_k2)
+                        logger.info(f"✅ k2 extraído via JavaScript: {k2[:30]}...")
+                except:
+                    pass
+
+            if user_id and k2:
+                logger.info(f"✅ UserData obtido com sucesso: UserId={user_id}")
+                return {'UserId': user_id, 'k2': k2}
 
             logger.warning("⚠️ Não foi possível extrair UserID/k2 da resposta")
+            logger.info(f"📄 Conteúdo da página (primeiros 500 chars): {content[:500]}")
             return None
 
         except Exception as e:
