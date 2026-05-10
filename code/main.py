@@ -453,17 +453,11 @@ class XATAccountGenerator:
                 else:
                     return None
                 
-                # Verificar bloqueios
+                # Verificar bloqueios - NÃO TENTAR CLOUDSCRAPER
                 if resposta.status_code in [403, 503] or any(term in resposta.text.lower() for term in ['checking your browser', 'cloudflare', 'cf-challenge', 'cf-browser-verification']):
-                    logger.warning(f"⚠️ Bloqueio detectado com proxy atual, tentando cloudscraper...")
-                    if self.scraper:
-                        scraper_kwargs = {k: v for k, v in kwargs.items() if k != 'proxies'}
-                        scraper_kwargs['proxies'] = current_proxy
-                        scraper_response = self._fazer_requisicao_com_cloudscraper(method, url, **scraper_kwargs)
-                        if scraper_response:
-                            self._sync_scraper_cookies_to_session()
-                            return scraper_response
+                    logger.warning(f"⚠️ Bloqueio Cloudflare detectado (status {resposta.status_code}) - Modo Playwright é obrigatório em 2026")
                     self._set_current_proxy(None)
+                    return None
                 else:
                     resposta.raise_for_status()
                     return resposta
@@ -772,11 +766,12 @@ class XATAccountGenerator:
             # Tentar extrair sitekey de reCAPTCHA da página de login
             self.last_recaptcha_sitekey = self._extrair_sitekey(texto_resposta)
             self.last_captcha_page_url = url
-            if not self.last_recaptcha_sitekey:
-                sitekey_from_js = self._extrair_sitekey_from_js_reference(texto_resposta, base_url=url)
-                if sitekey_from_js:
-                    self.last_recaptcha_sitekey = sitekey_from_js
-                    logger.info(f"✅ Sitekey de reCAPTCHA/Turnstile capturada de script JS: {self.last_recaptcha_sitekey}")
+            # NÃO tentar extrair sitekey de arquivos CDN - queima proxy desnecessariamente
+            # if not self.last_recaptcha_sitekey:
+            #     sitekey_from_js = self._extrair_sitekey_from_js_reference(texto_resposta, base_url=url)
+            #     if sitekey_from_js:
+            #         self.last_recaptcha_sitekey = sitekey_from_js
+            #         logger.info(f"✅ Sitekey de reCAPTCHA/Turnstile capturada de script JS: {self.last_recaptcha_sitekey}")
 
             if self.last_recaptcha_sitekey:
                 logger.info(f"✅ Sitekey de reCAPTCHA/Turnstile capturada da página de login: {self.last_recaptcha_sitekey}")
@@ -2079,13 +2074,13 @@ def main():
             merge(config, user_config)
 
         # Verificar se deve usar browser automation
-        if config.get('browser_automation', {}).get('enabled', True) and PLAYWRIGHT_AVAILABLE:
-            logger.info("🎭 Usando Browser Automation (Playwright)")
+        # Força Playwright como padrão em 2026 - cloudscraper é inútil contra Turnstile
+        if PLAYWRIGHT_AVAILABLE:
+            logger.info("🎭 Usando Browser Automation (Playwright) - Método Obrigatório para 2026")
             asyncio.run(run_browser_automation(config))
         else:
-            logger.info("🔗 Usando método tradicional (Requests)")
-            gerador = XATAccountGenerator()
-            gerador.executar()
+            logger.error("❌ Playwright não está disponível. Por favor, execute: pip install playwright")
+            sys.exit(1)
 
     except KeyboardInterrupt:
         logger.warning("\n⚠️ Aplicação encerrada pelo usuário")
@@ -2148,6 +2143,20 @@ async def run_browser_automation(config: Dict):
             return
 
         logger.info(f"📧 Processando {len(emails)} emails com {len(usernames)} usernames disponíveis")
+        
+        # Verificar configuração crítica
+        if not config.get('captcha_solver', {}).get('enabled', False):
+            logger.error("❌ ERRO CRÍTICO: Solver de captcha NÃO está habilitado no config.json")
+            logger.info("🔧 Habilite: config.json -> captcha_solver -> enabled: true")
+            return
+        
+        api_key = config.get('captcha_solver', {}).get('api_key', '')
+        if not api_key or api_key == '':
+            logger.error("❌ ERRO CRÍTICO: API key de 2captcha NÃO configurada")
+            logger.info("🔧 Configure: config.json -> captcha_solver -> api_key: '<sua_chave>'")
+            return
+        
+        logger.info("✅ Configuração crítica OK: Browser Automation + 2Captcha habilitados")
 
         # Inicializar automação
         async with XATBrowserAutomation(config, proxies, bad_proxies) as automation:
