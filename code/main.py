@@ -1353,11 +1353,11 @@ class XATBrowserAutomation:
         self.last_login_block_reason: Optional[str] = None
         self.last_captcha_block_reason: Optional[str] = None
         self.user_agents = [
-            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36",
             "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:122.0) Gecko/20100101 Firefox/122.0",
-            "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-            "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Edge/120.0.0.0"
+            "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36",
+            "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36",
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Edge/126.0.0.0"
         ]
 
         if not PLAYWRIGHT_AVAILABLE:
@@ -1754,6 +1754,7 @@ class XATBrowserAutomation:
 
             # Dar um breve tempo para o DOM ser atualizado pelo JavaScript
             await page.wait_for_timeout(1000)
+            await self._simulate_human_interaction(page)
 
             # Extrair k2 do formulário renderizado, se disponível
             k2_page = None
@@ -1800,23 +1801,35 @@ class XATBrowserAutomation:
                 return False
 
             logger.info("🔒 Aguardando carregamento do widget de captcha...")
-            captcha_timeout = self.config['browser_automation'].get('captcha_timeout', 120)
+            await self._simulate_human_interaction(page)
 
-            wait_timeout = min(max(captcha_timeout * 1000, 40000), 120000)
-            await page.wait_for_function(
-                """
-                () => {
-                    return document.querySelector('[data-sitekey]') || document.querySelector('.g-recaptcha') || document.querySelector('iframe[src*="turnstile"]') || document.querySelector('iframe[src*="captcha"]');
-                }
-                """,
-                timeout=wait_timeout,
-                polling=1000
-            )
+            captcha_timeout = self.config['browser_automation'].get('captcha_timeout', 40)
+            wait_timeout = min(captcha_timeout * 1000, 40000)
 
-            sitekey = await self._extract_sitekey_from_page(page)
-            if not sitekey:
-                content = await page.content()
-                sitekey = self._extract_sitekey_from_html(content)
+            content = await page.content()
+            sitekey = self._extract_sitekey_from_html(content)
+            if sitekey:
+                logger.info(f"✅ Sitekey encontrada no HTML antes do widget visível: {sitekey}")
+            else:
+                logger.info("🔍 Sitekey não encontrada no HTML, aguardando widget visível por até 40s")
+                await page.wait_for_function(
+                    """
+                    () => {
+                        return document.querySelector('[data-sitekey]') || document.querySelector('.g-recaptcha') || document.querySelector('iframe[src*="turnstile"]') || document.querySelector('iframe[src*="captcha"]');
+                    }
+                    """,
+                    timeout=wait_timeout,
+                    polling=1000
+                )
+                sitekey = await self._extract_sitekey_from_page(page)
+                if sitekey:
+                    logger.info("✅ Sitekey encontrada via DOM após widget visível")
+                else:
+                    logger.info("🔍 Sitekey não encontrada via DOM; tentando HTML novamente")
+                    content = await page.content()
+                    sitekey = self._extract_sitekey_from_html(content)
+                    if sitekey:
+                        logger.info("✅ Sitekey encontrada no HTML após aguardar widget")
 
             if not sitekey:
                 reason = "Turnstile widget não carregou / sitekey não encontrado"
@@ -1841,6 +1854,18 @@ class XATBrowserAutomation:
         except Exception as e:
             logger.warning(f"⚠️ Erro ao resolver captcha: {e}")
             return False
+
+    async def _simulate_human_interaction(self, page: Page) -> None:
+        """Simula movimento humano para ajudar o Turnstile a carregar."""
+        try:
+            await page.mouse.move(100, 100, steps=8)
+            await page.wait_for_timeout(200)
+            await page.mouse.wheel(0, 500)
+            await page.wait_for_timeout(200)
+            await page.mouse.move(200, 150, steps=8)
+            await page.wait_for_timeout(200)
+        except Exception as e:
+            logger.debug(f"⚠️ Falha ao simular interação humana: {e}")
 
     async def _fill_registration_form(self, page: Page, username: str, password: str, email: str) -> bool:
         """Preenche e submete o formulário de registro usando digitação simulada."""
