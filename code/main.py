@@ -1479,9 +1479,6 @@ class XATBrowserAutomation:
             # Acessar auser3.php
             await page.goto(self.AUSER_URL, wait_until='networkidle')
 
-            # Aguardar resposta JSON
-            response = await page.wait_for_load_state('networkidle')
-
             # Extrair dados da resposta
             content = await page.content()
             soup = BeautifulSoup(content, 'html.parser')
@@ -1501,15 +1498,16 @@ class XATBrowserAutomation:
                             return {'UserId': user_id, 'k2': k2}
 
             # Fallback: tentar extrair do conteúdo da página
-            text_content = await page.text_content()
-            user_id_match = re.search(r'UserId["\s:]+(\d+)', text_content)
-            k2_match = re.search(r'k2["\s:]+([a-zA-Z0-9]+)', text_content)
+            text_content = await page.text_content('body') if await page.query_selector('body') else ""
+            if text_content:
+                user_id_match = re.search(r'UserId["\s:]+(\d+)', text_content)
+                k2_match = re.search(r'k2["\s:]+([a-zA-Z0-9]+)', text_content)
 
-            if user_id_match and k2_match:
-                user_id = user_id_match.group(1)
-                k2 = k2_match.group(1)
-                logger.info(f"✅ UserData extraído: UserId={user_id} k2={k2[:30]}...")
-                return {'UserId': user_id, 'k2': k2}
+                if user_id_match and k2_match:
+                    user_id = user_id_match.group(1)
+                    k2 = k2_match.group(1)
+                    logger.info(f"✅ UserData extraído: UserId={user_id} k2={k2[:30]}...")
+                    return {'UserId': user_id, 'k2': k2}
 
             logger.warning("⚠️ Não foi possível extrair UserID/k2 da resposta")
             return None
