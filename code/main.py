@@ -1432,7 +1432,7 @@ class XATBrowserAutomation:
 
             # Criar nova página
             page = await self.context.new_page()
-            await page.set_default_timeout(self.config['browser_automation'].get('page_timeout', 30000))
+            page.set_default_timeout(self.config['browser_automation'].get('page_timeout', 30000))
 
             # Passo 1: Obter UserID/k2
             user_data = await self._get_user_data(page)
@@ -1498,7 +1498,11 @@ class XATBrowserAutomation:
                             return {'UserId': user_id, 'k2': k2}
 
             # Fallback: tentar extrair do conteúdo da página
-            text_content = await page.text_content('body') if await page.query_selector('body') else ""
+            try:
+                text_content = await page.text_content('body')
+            except:
+                text_content = ""
+            
             if text_content:
                 user_id_match = re.search(r'UserId["\s:]+(\d+)', text_content)
                 k2_match = re.search(r'k2["\s:]+([a-zA-Z0-9]+)', text_content)
@@ -1602,7 +1606,10 @@ class XATBrowserAutomation:
         """Verifica se a conta foi criada com sucesso"""
         try:
             content = await page.content()
-            text_content = await page.text_content()
+            try:
+                text_content = await page.text_content('body')
+            except:
+                text_content = content
 
             # Verificar indicadores de sucesso
             success_indicators = [
