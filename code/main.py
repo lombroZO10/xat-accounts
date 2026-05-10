@@ -22,7 +22,7 @@ from bs4 import BeautifulSoup
 
 # Playwright imports
 try:
-    from playwright.async_api import async_playwright, Browser, Page, BrowserContext
+    from playwright.async_api import async_playwright, Browser, Page, BrowserContext, Locator
     from playwright_stealth import Stealth
     PLAYWRIGHT_AVAILABLE = True
 except ImportError:
@@ -1841,53 +1841,54 @@ class XATBrowserAutomation:
         try:
             logger.info("📝 Preenchendo formulário de registro...")
 
-            # Esperar pelos campos mais prováveis do registro
-            await page.wait_for_selector(
-                'input[name="Username"], input[name="username"], input[name="user"], input[name="email"], input[type="email"]',
-                timeout=20000
-            )
+            # Aguardar campo de registro visível em qualquer frame
+            registration_field = await self._wait_for_registration_fields(page, 25000)
+            if not registration_field:
+                raise Exception("Campos de registro não foram encontrados na página ou em iframes")
 
             # Extrair k2 direto do formulário renderizado
-            k2_value = await page.get_attribute('input[name="k2"]', 'value')
+            k2_value = await self._extract_attribute_from_any_frame(page, 'input[name="k2"]', 'value')
             if k2_value:
                 logger.info(f"✅ Token k2 extraído da página: {k2_value[:30]}...")
 
             # Seletores mais específicos para evitar múltiplos formulários
-            username_selector = await self._find_first_selector(page, [
+            username_locator = await self._find_first_locator(page, [
                 'input[name="Username"]',
                 'input[name="username"]',
                 'input[name="user"]',
-                'input[id="username"]'
+                'input[id="username"]',
+                'input[type="text"]'
             ])
-            password_selector = await self._find_first_selector(page, [
+            password_locator = await self._find_first_locator(page, [
                 'input[name="password"]',
                 'input[name="pass"]',
                 'input[name="passwd"]',
-                'input[id="password"]'
+                'input[id="password"]',
+                'input[type="password"]'
             ])
-            password2_selector = await self._find_first_selector(page, [
+            password2_locator = await self._find_first_locator(page, [
                 'input[name="password2"]',
                 'input[name="pass2"]',
                 'input[name="confirm_password"]'
             ])
-            email_selector = await self._find_first_selector(page, [
+            email_locator = await self._find_first_locator(page, [
                 'input[name="email"]',
                 'input[id="email"]',
                 'input[type="email"]'
             ])
 
-            if not username_selector or not password_selector or not email_selector:
+            if not username_locator or not password_locator or not email_locator:
                 logger.warning("⚠️ Seletor de formulário de registro não encontrado. Tentando usar campos genéricos.")
-                username_selector = username_selector or 'input[name="Username"]'
-                password_selector = password_selector or 'input[name="password"]'
-                password2_selector = password2_selector or 'input[name="password2"]'
-                email_selector = email_selector or 'input[name="email"]'
+                username_locator = username_locator or page.locator('input[name="Username"], input[name="username"], input[name="user"], input[type="text"]').first
+                password_locator = password_locator or page.locator('input[name="password"], input[name="pass"], input[type="password"]').first
+                password2_locator = password2_locator or page.locator('input[name="password2"], input[name="pass2"], input[name="confirm_password"]').first
+                email_locator = email_locator or page.locator('input[name="email"], input[type="email"]').first
 
             # Preencher campos com typing humano
-            await self._type_with_delay(page, username_selector, username)
-            await self._type_with_delay(page, password_selector, password)
-            await self._type_with_delay(page, password2_selector, password)
-            await self._type_with_delay(page, email_selector, email)
+            await self._type_with_delay(page, username_locator, username)
+            await self._type_with_delay(page, password_locator, password)
+            await self._type_with_delay(page, password2_locator, password)
+            await self._type_with_delay(page, email_locator, email)
 
             try:
                 await page.check('input[name="agree"]')
@@ -1907,12 +1908,27 @@ class XATBrowserAutomation:
 
         except Exception as e:
             logger.error(f"❌ Erro ao preencher formulário: {e}")
+            try:
+                await page.screenshot(path='erro_registro.png', full_page=True)
+                logger.info("📸 Screenshot de erro salva em erro_registro.png")
+            except Exception as screenshot_error:
+                logger.warning(f"⚠️ Falha ao salvar screenshot de erro: {screenshot_error}")
+            try:
+                html_content = await page.content()
+                Path('erro_registro.html').write_text(html_content, encoding='utf-8')
+                logger.info("📝 Conteúdo HTML salvo em erro_registro.html")
+            except Exception as html_error:
+                logger.warning(f"⚠️ Falha ao salvar HTML de erro: {html_error}")
             return False
 
-    async def _type_with_delay(self, page: Page, selector: str, value: str, delay: int = 120) -> None:
+    async def _type_with_delay(self, page: Page, selector_or_locator, value: str, delay: int = 120) -> None:
         """Preenche um campo usando digitação simulada."""
         try:
-            locator = page.locator(selector).first
+            if isinstance(selector_or_locator, str):
+                locator = page.locator(selector_or_locator).first
+            else:
+                locator = selector_or_locator
+
             await locator.wait_for(timeout=20000)
             await locator.scroll_into_view_if_needed()
             await locator.click(click_count=3)
@@ -1922,19 +1938,57 @@ class XATBrowserAutomation:
             await page.wait_for_timeout(200)
         except Exception:
             try:
-                await page.fill(selector, value)
+                if isinstance(selector_or_locator, str):
+                    await page.fill(selector_or_locator, value)
             except Exception:
-                logger.warning(f"⚠️ Não foi possível preencher o campo {selector}")
+                logger.warning(f"⚠️ Não foi possível preencher o campo {selector_or_locator}")
 
-    async def _find_first_selector(self, page: Page, selectors: List[str]) -> Optional[str]:
-        """Retorna o primeiro seletor válido encontrado na página."""
-        for selector in selectors:
+    async def _wait_for_registration_fields(self, page: Page, timeout: int = 25000) -> Optional[Locator]:
+        """Aguarda o primeiro campo de registro ficar disponível em qualquer iframe."""
+        selectors = [
+            'input[name="Username"]',
+            'input[name="username"]',
+            'input[name="user"]',
+            'input[type="text"]',
+            'input[name="email"]',
+            'input[type="email"]'
+        ]
+        deadline = time.time() + timeout / 1000.0
+        while time.time() < deadline:
+            locator = await self._find_first_locator(page, selectors)
+            if locator:
+                return locator
+            await page.wait_for_timeout(500)
+        return None
+
+    async def _extract_attribute_from_any_frame(self, page: Page, selector: str, attribute: str) -> Optional[str]:
+        """Extrai atributo de um seletor em qualquer frame."""
+        for frame in page.frames:
             try:
-                if await page.locator(selector).first.count() > 0:
-                    return selector
+                element = await frame.query_selector(selector)
+                if element:
+                    value = await element.get_attribute(attribute)
+                    if value:
+                        return value
             except Exception:
                 continue
         return None
+
+    async def _find_first_locator(self, page: Page, selectors: List[str]) -> Optional[Locator]:
+        """Retorna o primeiro locator válido encontrado na página ou em iframes."""
+        first_found: Optional[Locator] = None
+        for frame in page.frames:
+            for selector in selectors:
+                try:
+                    locator = frame.locator(selector).first
+                    if await locator.count() > 0:
+                        if not first_found:
+                            first_found = locator
+                        if await locator.is_visible():
+                            return locator
+                except Exception:
+                    continue
+        return first_found
 
     async def _extract_sitekey_from_page(self, page: Page) -> Optional[str]:
         """Extrai o sitekey do widget de Turnstile/Recaptcha na página."""
