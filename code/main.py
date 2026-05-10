@@ -864,12 +864,13 @@ class XATAccountGenerator:
                 if self.config['captcha_solver'].get('enabled', False):
                     token = self._resolver_recaptcha(sitekey, self.last_captcha_page_url or url_registro)
                     if token:
-                        dados['g-recaptcha-response'] = token
+                        response_field = 'cf-turnstile-response' if sitekey.startswith('0x') else 'g-recaptcha-response'
+                        dados[response_field] = token
                         resposta = self._fazer_requisicao('POST', url_registro, data=dados, headers=headers)
                         if resposta:
                             texto_resposta = self._decodificar_resposta(resposta)
                             if not self._detectar_recaptcha(texto_resposta):
-                                logger.info("✅ reCAPTCHA resolvido via solver")
+                                logger.info("✅ reCAPTCHA/Turnstile resolvido via solver")
                                 return self._avaliar_resposta_criacao(resposta, username)
                             logger.warning("⚠️ reCAPTCHA ainda presente após solver")
                         else:
@@ -1083,7 +1084,7 @@ class XATAccountGenerator:
                     'key': api_key,
                     'method': method,
                     'googlekey': sitekey,
-                    'pageurl': self.BASE_URL,
+                    'pageurl': page_url,
                     'json': 1
                 },
                 timeout=30
