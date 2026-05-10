@@ -1905,31 +1905,29 @@ class XATBrowserAutomation:
             if k2_value:
                 logger.info(f"✅ Token k2 extraído da página: {k2_value[:30]}...")
 
-            # Seletores XAT específicos (name > id > type)
+            # Seletores XAT reais (IDs atualizados 2026)
             username_selectors = [
+                'input#registername',
                 'input[name="name"]',
                 'input#name',
                 'input[name="user"]',
                 'input[name="Username"]',
-                'input[name="username"]',
-                'input[id="username"]',
             ]
             password_selectors = [
+                'input#regpass',
                 'input[name="pass"]',
                 'input#pass',
                 'input[name="password"]',
-                'input[name="passwd"]',
-                'input[id="password"]',
             ]
             password2_selectors = [
+                'input#regpass2',
                 'input[name="pass2"]',
                 'input[name="password2"]',
-                'input[name="confirm_password"]'
             ]
             email_selectors = [
+                'input#regemail',
                 'input[name="email"]',
                 'input#email',
-                'input[id="email"]',
             ]
 
             # Encontrar locators com busca aprofundada em iframes
@@ -1961,22 +1959,29 @@ class XATBrowserAutomation:
 
             # Tentar marcar checkbox de concordância
             try:
-                checkboxes = page.locator('input[type="checkbox"]')
-                count = await checkboxes.count()
-                if count > 0:
-                    await checkboxes.first.check()
-                    logger.info("✅ Checkbox de concordância marcado")
-            except Exception:
-                pass
+                # Tentar ID específico do XAT primeiro
+                terms_checkbox = page.locator('input#registerterms')
+                if await terms_checkbox.count() > 0:
+                    await terms_checkbox.check()
+                    logger.info("✅ Checkbox de termos marcado")
+                else:
+                    # Tentar label associado
+                    terms_label = page.locator('label[for="registerterms"]')
+                    if await terms_label.count() > 0:
+                        await terms_label.click()
+                        logger.info("✅ Label de termos clicado")
+            except Exception as e:
+                logger.warning(f"⚠️ Não foi possível marcar terms: {e}")
 
             await page.wait_for_timeout(1500)
 
             # Garantir que token de captcha está injetado
             await self._inject_captcha_token_if_missing(page)
 
-            # Procurar e clicar no botão de submit
+            # Clicar no botão de submit (é um <a>, não <button>)
             submit_found = False
             submit_selectors = [
+                'a#butregister',  # Link de submit (ID real do XAT)
                 'button:has-text("register")',
                 'button:has-text("Register")',
                 'input[type="submit"]',
@@ -1992,7 +1997,8 @@ class XATBrowserAutomation:
                         await button.click()
                         submit_found = True
                         break
-                except Exception:
+                except Exception as e:
+                    logger.debug(f"  Seletor {selector} não encontrado: {e}")
                     continue
 
             if not submit_found:
@@ -2046,19 +2052,21 @@ class XATBrowserAutomation:
     async def _wait_for_registration_fields(self, page: Page, timeout: int = 25000) -> Optional[Locator]:
         """Aguarda o primeiro campo de registro ficar disponível em qualquer iframe."""
         selectors = [
-            'input[name="Username"]',
-            'input[name="username"]',
-            'input[name="user"]',
-            'input[type="text"]',
+            'input#registername',
+            'input#regpass',
+            'input#regemail',
+            'input[name="name"]',
             'input[name="email"]',
-            'input[type="email"]'
+            'input[type="text"]',
         ]
         deadline = time.time() + timeout / 1000.0
         while time.time() < deadline:
-            locator = await self._find_first_locator(page, selectors)
+            locator = await self._find_first_locator_in_frames(page, selectors)
             if locator:
+                logger.info("✅ Campos de registro encontrados na página")
                 return locator
             await page.wait_for_timeout(500)
+        logger.warning(f"⚠️ Campos de registro não encontrados após {timeout}ms")
         return None
 
     async def _extract_attribute_from_any_frame(self, page: Page, selector: str, attribute: str) -> Optional[str]:
