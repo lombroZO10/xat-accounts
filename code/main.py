@@ -1095,16 +1095,22 @@ class XATAccountGenerator:
 
         try:
             method = 'turnstile' if sitekey.startswith('0x') else 'userrecaptcha'
-            logger.info(f"🔐 Enviando desafio reCAPTCHA/Turnstile para 2captcha (method={method}, sitekey={sitekey[:20]}..., pageurl={self.BASE_URL})")
+            logger.info(f"🔐 Enviando desafio reCAPTCHA/Turnstile para 2captcha (method={method}, sitekey={sitekey[:20]}..., pageurl={page_url})")
+            params = {
+                'key': api_key,
+                'method': method,
+                'pageurl': page_url,
+                'json': 1
+            }
+            if method == 'turnstile':
+                params['sitekey'] = sitekey
+                params['googlekey'] = sitekey
+            else:
+                params['googlekey'] = sitekey
+
             resposta = requests.get(
                 'http://2captcha.com/in.php',
-                params={
-                    'key': api_key,
-                    'method': method,
-                    'googlekey': sitekey,
-                    'pageurl': page_url,
-                    'json': 1
-                },
+                params=params,
                 timeout=30
             )
             dados = resposta.json()
@@ -1454,7 +1460,11 @@ class XATBrowserAutomation:
                 return False
 
             # Aguardar carregamento e resolução de captcha
-            await self._wait_for_captcha_resolution(page)
+            captcha_resolved = await self._wait_for_captcha_resolution(page)
+            if not captcha_resolved:
+                logger.warning("⚠️ Captcha não resolvido. Abortando criação de conta.")
+                await page.close()
+                return False
 
             # Passo 3: Preencher e submeter formulário
             success = await self._fill_registration_form(page, username, password, email)
@@ -1542,7 +1552,7 @@ class XATBrowserAutomation:
             logger.error(f"❌ Erro ao acessar página de login: {e}")
             return False
 
-    async def _wait_for_captcha_resolution(self, page: Page):
+    async def _wait_for_captcha_resolution(self, page: Page) -> bool:
         """Aguarda resolução automática do captcha pelo navegador"""
         try:
             logger.info("🔒 Aguardando resolução automática do captcha...")
@@ -1553,7 +1563,6 @@ class XATBrowserAutomation:
             await page.wait_for_function(
                 """
                 () => {
-                    // Verificar se não há turnstile ou recaptcha visível
                     const turnstile = document.querySelector('[data-sitekey]');
                     const recaptcha = document.querySelector('.g-recaptcha, #captcha');
                     return !turnstile && !recaptcha;
@@ -1563,9 +1572,11 @@ class XATBrowserAutomation:
             )
 
             logger.info("✅ Captcha resolvido automaticamente pelo navegador")
+            return True
 
         except Exception as e:
             logger.warning(f"⚠️ Timeout aguardando resolução do captcha: {e}")
+            return False
 
     async def _fill_registration_form(self, page: Page, username: str, password: str, email: str) -> bool:
         """Preenche e submete o formulário de registro"""
