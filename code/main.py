@@ -66,7 +66,7 @@ DEFAULT_CONFIG = {
         "enabled": True,
         "headless": True,
         "proxy_rotation": True,
-        "captcha_timeout": 120,
+        "captcha_timeout": 40,
         "page_timeout": 30000
     },
     "captcha_solver": {
@@ -248,15 +248,24 @@ class XATAccountGenerator:
             return False
     
     def carregar_proxies(self) -> bool:
-        """Carrega proxies pagos (apenas proxies pagos são usados)"""
+        """Carrega proxies pagos e fallback público se necessário."""
         self.paid_proxies = self._load_proxy_file(DATA_DIR / 'proxies.txt')
+        self.public_proxies = self._load_proxy_file(DATA_DIR / 'public_proxies.txt')
 
-        if not self.paid_proxies:
-            logger.error("❌ Nenhum proxy pago encontrado em proxies.txt")
-            return False
+        if self.paid_proxies:
+            logger.info(f"✅ Carregados {len(self.paid_proxies)} proxies pagos")
+            return True
 
-        logger.info(f"✅ Carregados {len(self.paid_proxies)} proxies pagos")
-        return True
+        if self.public_proxies and self.config['proxy'].get('use_public_fallback', True):
+            logger.warning("⚠️ Nenhum proxy pago encontrado em proxies.txt; usando public_proxies.txt como fallback")
+            self.paid_proxies = self.public_proxies
+            self.public_proxies = []
+            return True
+
+        logger.error("❌ Nenhum proxy pago encontrado em proxies.txt")
+        if self.public_proxies:
+            logger.warning("⚠️ Public proxies disponíveis, mas fallback está desabilitado nas configurações")
+        return False
 
     def _load_proxy_file(self, arquivo: Path) -> List[str]:
         """Carrega proxies de um arquivo específico"""
@@ -275,11 +284,16 @@ class XATAccountGenerator:
             return []
     
     def _validar_proxies(self) -> None:
-        """Valida proxies pagos testando conectividade"""
+        """Valida proxies pagos testando conectividade."""
         if not self.paid_proxies:
-            logger.warning("⚠️ Nenhum proxy para validar")
-            return
-        
+            if self.public_proxies and self.config['proxy'].get('use_public_fallback', True):
+                logger.warning("⚠️ Nenhum proxy pago carregado. Usando public_proxies.txt como fallback para validação.")
+                self.paid_proxies = self.public_proxies
+                self.public_proxies = []
+            else:
+                logger.warning("⚠️ Nenhum proxy para validar")
+                return
+
         logger.info(f"🔍 Iniciando validação de {len(self.paid_proxies)} proxies pagos...")
         
         proxies_validos = []
@@ -324,6 +338,12 @@ class XATAccountGenerator:
         
         self.paid_proxies = proxies_validos
         logger.info(f"✅ Validação concluída: {len(proxies_validos)}/{total} proxies válidos")
+
+        if not self.paid_proxies and self.public_proxies and self.config['proxy'].get('use_public_fallback', True):
+            logger.warning("⚠️ Nenhum proxy pago válido após validação. Tentando public_proxies.txt como fallback.")
+            self.paid_proxies = self.public_proxies
+            self.public_proxies = []
+            self._validar_proxies()
     
     def _validar_email(self, email: str) -> bool:
         """Valida formato básico de email"""
@@ -1470,11 +1490,13 @@ class XATBrowserAutomation:
             proxy=proxy_config
         )
 
+        user_agent = random.choice(self.user_agents)
         self.context = await self.browser.new_context(
             viewport={'width': 1920, 'height': 1080},
-            user_agent=random.choice(self.user_agents),
+            user_agent=user_agent,
             locale='pt-BR',
-            timezone_id='America/Sao_Paulo'
+            timezone_id='America/Sao_Paulo',
+            extra_http_headers=self._build_extra_http_headers(user_agent)
         )
 
         stealth_config = Stealth()
@@ -1806,10 +1828,9 @@ class XATBrowserAutomation:
             captcha_timeout = self.config['browser_automation'].get('captcha_timeout', 40)
             wait_timeout = min(captcha_timeout * 1000, 40000)
 
-            content = await page.content()
-            sitekey = self._extract_sitekey_from_html(content)
+            sitekey = await self._extract_sitekey_from_full_page_content(page)
             if sitekey:
-                logger.info(f"✅ Sitekey encontrada no HTML antes do widget visível: {sitekey}")
+                logger.info(f"✅ Sitekey encontrada via regex/HTML antes do widget visível: {sitekey}")
             else:
                 logger.info("🔍 Sitekey não encontrada no HTML, aguardando widget visível por até 40s")
                 await page.wait_for_function(
@@ -1826,8 +1847,7 @@ class XATBrowserAutomation:
                     logger.info("✅ Sitekey encontrada via DOM após widget visível")
                 else:
                     logger.info("🔍 Sitekey não encontrada via DOM; tentando HTML novamente")
-                    content = await page.content()
-                    sitekey = self._extract_sitekey_from_html(content)
+                    sitekey = await self._extract_sitekey_from_full_page_content(page)
                     if sitekey:
                         logger.info("✅ Sitekey encontrada no HTML após aguardar widget")
 
@@ -2074,16 +2094,58 @@ class XATBrowserAutomation:
     def _extract_sitekey_from_html(self, html_content: str) -> Optional[str]:
         """Extrai sitekey de conteúdo HTML usando regex."""
         try:
-            match = re.search(r'data-sitekey=["\']([^"\']+)["\']', html_content)
-            if match:
-                return match.group(1)
-            match = re.search(r'sitekey=([^&"\']+)', html_content)
-            if match:
-                return match.group(1)
+            patterns = [
+                r'data-sitekey=["\']([^"\']+)["\']',
+                r'sitekey=(?:["\']?)([^"\'&>\s]+)',
+                r'(0x4[a-zA-Z0-9_-]{18,22})'
+            ]
+            for pattern in patterns:
+                match = re.search(pattern, html_content)
+                if match:
+                    return match.group(1)
             return None
         except Exception as e:
             logger.warning(f"⚠️ Erro ao extrair sitekey do HTML: {e}")
             return None
+
+    async def _extract_sitekey_from_full_page_content(self, page: Page) -> Optional[str]:
+        """Busca sitekey no HTML completo da página principal e de frames."""
+        try:
+            page_content = await page.content()
+            sitekey = self._extract_sitekey_from_html(page_content)
+            if sitekey:
+                return sitekey
+
+            for frame in page.frames:
+                try:
+                    frame_html = await frame.content()
+                    sitekey = self._extract_sitekey_from_html(frame_html)
+                    if sitekey:
+                        return sitekey
+                except Exception:
+                    continue
+
+            return None
+        except Exception as e:
+            logger.warning(f"⚠️ Erro ao buscar sitekey no conteúdo completo da página: {e}")
+            return None
+
+    def _build_extra_http_headers(self, user_agent: str) -> Dict[str, str]:
+        """Retorna cabeçalhos Client Hints compatíveis com o User-Agent escolhido."""
+        if 'Edg/' in user_agent or 'Edge/' in user_agent:
+            brand = '"Chromium";v="126", "Microsoft Edge";v="126", ";Not A Brand";v="99"'
+        elif 'Firefox/' in user_agent:
+            brand = '"Mozilla";v="120", "Firefox";v="120", ";Not A Brand";v="99"'
+        else:
+            brand = '"Chromium";v="126", "Google Chrome";v="126", ";Not A Brand";v="99"'
+
+        platform = '"Windows"' if 'Windows' in user_agent else '"Linux"'
+
+        return {
+            'sec-ch-ua': brand,
+            'sec-ch-ua-mobile': '?0',
+            'sec-ch-ua-platform': platform
+        }
 
     async def _inject_captcha_token(self, page: Page, token: str) -> None:
         """Injeta o token do solver nos campos escondidos do formulário."""
@@ -2125,7 +2187,7 @@ class XATBrowserAutomation:
         """Garante que o token de captcha está presente antes de submeter o formulário."""
         token_field = await page.query_selector('textarea[name="cf-turnstile-response"], input[name="cf-turnstile-response"], textarea[name="g-recaptcha-response"], input[name="g-recaptcha-response"]')
         if not token_field:
-            sitekey = await self._extract_sitekey_from_page(page)
+            sitekey = await self._extract_sitekey_from_full_page_content(page)
             if sitekey:
                 page_url = page.url
                 token = self._resolver_recaptcha(sitekey, page_url)
