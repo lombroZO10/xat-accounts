@@ -17,7 +17,7 @@ import html
 from datetime import datetime
 from pathlib import Path
 from typing import List, Dict, Optional, Tuple, Set
-from urllib.parse import urljoin, parse_qs, urlparse
+from urllib.parse import urljoin, parse_qs, urlencode, urlparse
 from bs4 import BeautifulSoup
 
 # Playwright imports
@@ -2219,6 +2219,19 @@ class XATBrowserAutomation:
             'https': server
         }
 
+    def _normalize_captcha_pageurl(self, page_url: str) -> str:
+        """Normaliza pageurl para enviar ao solver, removendo parâmetros sensíveis."""
+        try:
+            parsed = urlparse(page_url)
+            query = parse_qs(parsed.query)
+            keep = {}
+            if 'mode' in query:
+                keep['mode'] = query['mode']
+            normalized_query = urlencode(keep, doseq=True)
+            return parsed._replace(query=normalized_query).geturl()
+        except Exception:
+            return page_url
+
     def _resolver_recaptcha(self, sitekey: str, page_url: str, proxies: Optional[Dict[str, str]] = None) -> Optional[str]:
         """Resolve reCAPTCHA/Turnstile usando 2captcha."""
         provider = self.config['captcha_solver'].get('provider', '2captcha')
@@ -2234,11 +2247,12 @@ class XATBrowserAutomation:
 
         try:
             method = 'turnstile' if sitekey.startswith('0x') else 'userrecaptcha'
-            logger.info(f"🔐 Enviando desafio reCAPTCHA/Turnstile para 2captcha (method={method}, sitekey={sitekey[:20]}..., pageurl={page_url})")
+            normalized_pageurl = self._normalize_captcha_pageurl(page_url)
+            logger.info(f"🔐 Enviando desafio reCAPTCHA/Turnstile para 2captcha (method={method}, sitekey={sitekey[:20]}..., pageurl={normalized_pageurl})")
             params = {
                 'key': api_key,
                 'method': method,
-                'pageurl': page_url,
+                'pageurl': normalized_pageurl,
                 'json': 1
             }
             if method == 'turnstile':
