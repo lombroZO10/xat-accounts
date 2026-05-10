@@ -1897,72 +1897,114 @@ class XATBrowserAutomation:
             if not registration_field:
                 raise Exception("Campos de registro não foram encontrados na página ou em iframes")
 
+            logger.info("⏳ Aguardando 2s para garantir que o formulário está pronto...")
+            await page.wait_for_timeout(2000)
+
             # Extrair k2 direto do formulário renderizado
             k2_value = await self._extract_attribute_from_any_frame(page, 'input[name="k2"]', 'value')
             if k2_value:
                 logger.info(f"✅ Token k2 extraído da página: {k2_value[:30]}...")
 
-            # Seletores mais específicos para evitar múltiplos formulários
-            username_locator = await self._find_first_locator(page, [
+            # Seletores XAT específicos (name > id > type)
+            username_selectors = [
+                'input[name="name"]',
+                'input#name',
                 'input[name="user"]',
                 'input[name="Username"]',
                 'input[name="username"]',
                 'input[id="username"]',
-                'input[type="text"]'
-            ])
-            password_locator = await self._find_first_locator(page, [
+            ]
+            password_selectors = [
                 'input[name="pass"]',
+                'input#pass',
                 'input[name="password"]',
                 'input[name="passwd"]',
                 'input[id="password"]',
-                'input[type="password"]'
-            ])
-            password2_locator = await self._find_first_locator(page, [
+            ]
+            password2_selectors = [
                 'input[name="pass2"]',
                 'input[name="password2"]',
                 'input[name="confirm_password"]'
-            ])
-            email_locator = await self._find_first_locator(page, [
+            ]
+            email_selectors = [
                 'input[name="email"]',
+                'input#email',
                 'input[id="email"]',
-                'input[type="email"]'
-            ])
+            ]
 
-            if not username_locator or not password_locator or not email_locator:
-                logger.warning("⚠️ Seletor de formulário de registro não encontrado. Tentando usar campos genéricos.")
-                username_locator = username_locator or page.locator('input[name="user"], input[name="username"], input[name="Username"], input[type="text"]').first
-                password_locator = password_locator or page.locator('input[name="pass"], input[name="password"], input[type="password"]').first
-                password2_locator = password2_locator or page.locator('input[name="pass2"], input[name="password2"], input[name="confirm_password"]').first
-                email_locator = email_locator or page.locator('input[name="email"], input[type="email"]').first
+            # Encontrar locators com busca aprofundada em iframes
+            username_locator = await self._find_first_locator_in_frames(page, username_selectors)
+            password_locator = await self._find_first_locator_in_frames(page, password_selectors)
+            password2_locator = await self._find_first_locator_in_frames(page, password2_selectors)
+            email_locator = await self._find_first_locator_in_frames(page, email_selectors)
 
-            # Preencher campos com typing humano
-            await self._type_with_delay(page, username_locator, username)
-            await self._type_with_delay(page, password_locator, password)
-            await self._type_with_delay(page, password2_locator, password)
-            await self._type_with_delay(page, email_locator, email)
+            if not username_locator:
+                logger.warning("⚠️ Campo de username não encontrado!")
+                raise Exception("Username field not found")
+            if not email_locator:
+                logger.warning("⚠️ Campo de email não encontrado!")
+                raise Exception("Email field not found")
+            if not password_locator:
+                logger.warning("⚠️ Campo de password não encontrado!")
+                raise Exception("Password field not found")
 
+            logger.info("✅ Todos os campos de formulário encontrados. Preenchendo...")
+
+            # Preencher campos com click e type (forçar foco)
+            await self._fill_form_field(page, username_locator, username, "username")
+            await self._fill_form_field(page, password_locator, password, "password")
+            if password2_locator:
+                await self._fill_form_field(page, password2_locator, password, "password2")
+            await self._fill_form_field(page, email_locator, email, "email")
+
+            logger.info("✅ Campos preenchidos com sucesso")
+
+            # Tentar marcar checkbox de concordância
             try:
-                await page.locator('input[type="checkbox"]').first.check()
+                checkboxes = page.locator('input[type="checkbox"]')
+                count = await checkboxes.count()
+                if count > 0:
+                    await checkboxes.first.check()
+                    logger.info("✅ Checkbox de concordância marcado")
             except Exception:
-                try:
-                    await page.check('input[name="agree"]')
-                except Exception:
-                    pass
+                pass
 
             await page.wait_for_timeout(1500)
 
+            # Garantir que token de captcha está injetado
             await self._inject_captcha_token_if_missing(page)
 
-            try:
-                await page.locator('button:has-text("register")').first.click()
-            except Exception:
-                await page.click('input[type="submit"], button[type="submit"], .submit-btn')
+            # Procurar e clicar no botão de submit
+            submit_found = False
+            submit_selectors = [
+                'button:has-text("register")',
+                'button:has-text("Register")',
+                'input[type="submit"]',
+                'button[type="submit"]',
+                '.submit-btn'
+            ]
+            
+            for selector in submit_selectors:
+                try:
+                    button = page.locator(selector).first
+                    if await button.count() > 0:
+                        logger.info(f"✅ Botão de submit encontrado: {selector}")
+                        await button.click()
+                        submit_found = True
+                        break
+                except Exception:
+                    continue
 
-            await page.wait_for_load_state('networkidle')
-            await self._monitor_submission_result(page)
+            if not submit_found:
+                logger.warning("⚠️ Botão de submit não foi encontrado")
+
+            await page.wait_for_timeout(2000)
+            await page.wait_for_load_state('networkidle', timeout=15000)
+            
+            result = await self._verify_registration_result(page, username, email)
 
             logger.info("✅ Formulário submetido")
-            return True
+            return result
 
         except Exception as e:
             logger.error(f"❌ Erro ao preencher formulário: {e}")
@@ -2031,6 +2073,67 @@ class XATBrowserAutomation:
             except Exception:
                 continue
         return None
+
+    async def _find_first_locator_in_frames(self, page: Page, selectors: List[str]) -> Optional[Locator]:
+        """Encontra o primeiro locator visível em qualquer frame da página."""
+        # Primeiro tenta na página principal
+        for selector in selectors:
+            try:
+                locator = page.locator(selector).first
+                if await locator.count() > 0 and await locator.is_visible():
+                    logger.debug(f"✅ Seletor encontrado na página principal: {selector}")
+                    return locator
+            except Exception:
+                continue
+
+        # Depois procura em todos os iframes
+        for frame in page.frames:
+            for selector in selectors:
+                try:
+                    locator = frame.locator(selector).first
+                    if await locator.count() > 0 and await locator.is_visible():
+                        logger.debug(f"✅ Seletor encontrado em iframe: {selector}")
+                        return locator
+                except Exception:
+                    continue
+
+        return None
+
+    async def _fill_form_field(self, page: Page, locator: Locator, value: str, field_name: str, delay: int = 120) -> None:
+        """Preenche um campo de formulário com clique forçado e tipagem simulada."""
+        try:
+            logger.info(f"📝 Preenchendo {field_name}...")
+            
+            # Aguardar que o campo esteja visível
+            await locator.wait_for(timeout=20000)
+            
+            # Scroll para o campo
+            await locator.scroll_into_view_if_needed()
+            
+            # Forçar clique para garantir foco
+            await locator.click(click_count=1)
+            await page.wait_for_timeout(300)
+            
+            # Limpar qualquer conteúdo anterior
+            await locator.fill("")
+            await page.wait_for_timeout(200)
+            
+            # Digitar com delay simulado
+            for char in value:
+                await locator.type(char, delay=random.randint(delay - 40, delay + 40))
+            
+            await page.wait_for_timeout(300)
+            logger.info(f"✅ {field_name} preenchido com sucesso")
+            
+        except Exception as e:
+            logger.warning(f"⚠️ Erro ao preencher {field_name}: {e}")
+            # Tentar alternativa com fill direto
+            try:
+                await locator.fill(value)
+                logger.info(f"✅ {field_name} preenchido via fill (alternativa)")
+            except Exception as e2:
+                logger.error(f"❌ Falha ao preencher {field_name}: {e2}")
+                raise
 
     async def _find_first_locator(self, page: Page, selectors: List[str]) -> Optional[Locator]:
         """Retorna o primeiro locator válido encontrado na página ou em iframes."""
