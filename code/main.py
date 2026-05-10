@@ -1802,16 +1802,22 @@ class XATBrowserAutomation:
             logger.info("🔒 Aguardando carregamento do widget de captcha...")
             captcha_timeout = self.config['browser_automation'].get('captcha_timeout', 120)
 
+            wait_timeout = min(max(captcha_timeout * 1000, 40000), 120000)
             await page.wait_for_function(
                 """
                 () => {
-                    return document.querySelector('[data-sitekey]') || document.querySelector('.g-recaptcha') || document.querySelector('iframe[src*="turnstile"]');
+                    return document.querySelector('[data-sitekey]') || document.querySelector('.g-recaptcha') || document.querySelector('iframe[src*="turnstile"]') || document.querySelector('iframe[src*="captcha"]');
                 }
                 """,
-                timeout=10000
+                timeout=wait_timeout,
+                polling=1000
             )
 
             sitekey = await self._extract_sitekey_from_page(page)
+            if not sitekey:
+                content = await page.content()
+                sitekey = self._extract_sitekey_from_html(content)
+
             if not sitekey:
                 reason = "Turnstile widget não carregou / sitekey não encontrado"
                 logger.warning(f"⚠️ {reason}")
@@ -2019,6 +2025,14 @@ class XATBrowserAutomation:
                             return null;
                         }
                     }
+                    const captchaIframe = document.querySelector('iframe[src*="captcha"]');
+                    if (captchaIframe) {
+                        try {
+                            return new URL(captchaIframe.src).searchParams.get('sitekey');
+                        } catch (e) {
+                            return null;
+                        }
+                    }
                     const turnstile = document.querySelector('[data-sitekey]');
                     if (turnstile) {
                         return turnstile.dataset.sitekey || turnstile.getAttribute('data-sitekey');
@@ -2030,6 +2044,20 @@ class XATBrowserAutomation:
             return sitekey
         except Exception as e:
             logger.warning(f"⚠️ Erro ao extrair sitekey do DOM: {e}")
+            return None
+
+    def _extract_sitekey_from_html(self, html_content: str) -> Optional[str]:
+        """Extrai sitekey de conteúdo HTML usando regex."""
+        try:
+            match = re.search(r'data-sitekey=["\']([^"\']+)["\']', html_content)
+            if match:
+                return match.group(1)
+            match = re.search(r'sitekey=([^&"\']+)', html_content)
+            if match:
+                return match.group(1)
+            return None
+        except Exception as e:
+            logger.warning(f"⚠️ Erro ao extrair sitekey do HTML: {e}")
             return None
 
     async def _inject_captcha_token(self, page: Page, token: str) -> None:
