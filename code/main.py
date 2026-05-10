@@ -1075,15 +1075,15 @@ class XATAccountGenerator:
             return None
 
         try:
-            method = 'userrecaptcha'  # Usar userrecaptcha para compatibilidade com Turnstile
-            logger.info(f"🔐 Enviando desafio reCAPTCHA/Turnstile para 2captcha (method={method})")
+            method = 'turnstile' if sitekey.startswith('0x') else 'userrecaptcha'
+            logger.info(f"🔐 Enviando desafio reCAPTCHA/Turnstile para 2captcha (method={method}, sitekey={sitekey[:20]}..., pageurl={self.BASE_URL})")
             resposta = requests.get(
                 'http://2captcha.com/in.php',
                 params={
                     'key': api_key,
                     'method': method,
                     'googlekey': sitekey,
-                    'pageurl': self.BASE_URL,  # Usar domínio base em vez da URL específica
+                    'pageurl': self.BASE_URL,
                     'json': 1
                 },
                 timeout=30
