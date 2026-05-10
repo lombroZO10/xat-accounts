@@ -1974,14 +1974,19 @@ class XATBrowserAutomation:
         if not self.current_proxy:
             return None
 
-        parts = self.current_proxy.split(':')
-        if len(parts) < 2:
-            return None
-
-        server = f'http://{parts[0]}:{parts[1]}'
-        if len(parts) >= 4:
-            auth = f'{parts[2]}:{parts[3]}@'
-            server = f'http://{auth}{parts[0]}:{parts[1]}'
+        proxy_clean = self.current_proxy.replace('http://', '').replace('https://', '')
+        if '@' in proxy_clean:
+            creds, host_port = proxy_clean.rsplit('@', 1)
+            if ':' not in host_port:
+                return None
+            username, password = creds.split(':', 1)
+            host, port = host_port.rsplit(':', 1)
+            server = f'http://{username}:{password}@{host}:{port}'
+        else:
+            if ':' not in proxy_clean:
+                return None
+            host, port = proxy_clean.rsplit(':', 1)
+            server = f'http://{host}:{port}'
 
         return {
             'http': server,
