@@ -1752,10 +1752,34 @@ class XATBrowserAutomation:
             else:
                 logger.warning(f"⚠️ Página suspeita carregada: {title}")
 
+            # Dar um breve tempo para o DOM ser atualizado pelo JavaScript
+            await page.wait_for_timeout(1000)
+
             # Extrair k2 do formulário renderizado, se disponível
-            k2_page = await page.get_attribute('input[name="k2"]', 'value')
+            k2_page = None
+            try:
+                k2_page = await page.get_attribute('input[name="k2"]', 'value')
+            except Exception:
+                pass
+
+            if not k2_page:
+                try:
+                    content = await page.content()
+                    soup = BeautifulSoup(content, 'html.parser')
+                    hidden_k2 = soup.find('input', {'name': 'k2'})
+                    if hidden_k2 and hidden_k2.get('value'):
+                        k2_page = hidden_k2['value']
+                    else:
+                        match = re.search(r'(?:&amp;|&)k2=([A-Za-z0-9_-]+)', content)
+                        if match:
+                            k2_page = match.group(1)
+                except Exception:
+                    pass
+
             if k2_page:
                 logger.info(f"✅ Token k2 obtido da página de login: {k2_page[:30]}...")
+            else:
+                logger.warning("⚠️ Token k2 não encontrado por atributo; continuando sem ele")
 
             # Extrair sitekey do widget presente na página
             sitekey = await self._extract_sitekey_from_page(page)
