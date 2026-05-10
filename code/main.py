@@ -1962,14 +1962,14 @@ class XATBrowserAutomation:
                 # Tentar ID específico do XAT primeiro
                 terms_checkbox = page.locator('input#registerterms')
                 if await terms_checkbox.count() > 0:
-                    await terms_checkbox.check()
-                    logger.info("✅ Checkbox de termos marcado")
+                    await terms_checkbox.check(force=True)
+                    logger.info("✅ Checkbox de termos marcado com force=True")
                 else:
                     # Tentar label associado
                     terms_label = page.locator('label[for="registerterms"]')
                     if await terms_label.count() > 0:
-                        await terms_label.click()
-                        logger.info("✅ Label de termos clicado")
+                        await terms_label.click(force=True)
+                        logger.info("✅ Label de termos clicado com force=True")
             except Exception as e:
                 logger.warning(f"⚠️ Não foi possível marcar terms: {e}")
 
@@ -2003,6 +2003,13 @@ class XATBrowserAutomation:
 
             if not submit_found:
                 logger.warning("⚠️ Botão de submit não foi encontrado")
+                # Último fallback: tentar clicar diretamente no link
+                try:
+                    await page.click('a#butregister', force=True)
+                    logger.info("✅ Botão de submit clicado via fallback force=True")
+                    submit_found = True
+                except Exception as e:
+                    logger.warning(f"⚠️ Fallback do submit também falhou: {e}")
 
             await page.wait_for_timeout(2000)
             await page.wait_for_load_state('networkidle', timeout=15000)
