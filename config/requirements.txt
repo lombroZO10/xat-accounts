@@ -4,3 +4,5 @@ fake-useragent==1.4.0
 urllib3==2.1.0
 cloudscraper
 pysocks
+playwright==1.59.0
+playwright-stealth==1.0.1

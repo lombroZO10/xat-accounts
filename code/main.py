@@ -1406,7 +1406,11 @@ class XATBrowserAutomation:
             options = list(self.proxies)
 
         self.current_proxy = random.choice(options)
-        logger.info(f"🌐 Proxy selecionado: {self.current_proxy.split(':')[0]}:{self.current_proxy.split(':')[1]}")
+        # Extrair apenas IP:port para log (sem credenciais)
+        proxy_display = self.current_proxy.replace('http://', '').replace('https://', '')
+        if '@' in proxy_display:
+            proxy_display = proxy_display.split('@', 1)[1]
+        logger.info(f"🌐 Proxy selecionado: {proxy_display}")
         return self.current_proxy
 
     def _build_proxy_settings(self, proxy: Optional[str]) -> Optional[Dict[str, str]]:
@@ -1414,17 +1418,27 @@ class XATBrowserAutomation:
         if not proxy:
             return None
 
-        parts = proxy.split(':')
-        if len(parts) >= 4:
+        # Remove 'http://' se presente
+        proxy_clean = proxy.replace('http://', '').replace('https://', '')
+        
+        # Formato: username:password@ip:port ou ip:port
+        if '@' in proxy_clean:
+            credentials, server = proxy_clean.rsplit('@', 1)
+            username, password = credentials.split(':', 1)
+            if ':' in server:
+                ip, port = server.rsplit(':', 1)
+                return {
+                    'server': f'http://{ip}:{port}',
+                    'username': username,
+                    'password': password
+                }
+        elif ':' in proxy_clean:
+            # Sem credenciais - assume ip:port
+            ip, port = proxy_clean.rsplit(':', 1)
             return {
-                'server': f'http://{parts[0]}:{parts[1]}',
-                'username': parts[2],
-                'password': parts[3]
+                'server': f'http://{ip}:{port}'
             }
-        if len(parts) >= 2:
-            return {
-                'server': f'http://{parts[0]}:{parts[1]}'
-            }
+        
         return None
 
     async def _create_browser_context(self) -> None:
