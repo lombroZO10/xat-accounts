@@ -13,6 +13,7 @@ import time
 import requests
 import importlib.util
 import asyncio
+import html
 from datetime import datetime
 from pathlib import Path
 from typing import List, Dict, Optional, Tuple, Set
@@ -1664,7 +1665,29 @@ class XATBrowserAutomation:
                             k2 = match.group(1)
                             logger.info(f"✅ k2 extraído do conteúdo: {k2[:30]}...")
 
-            # Método 3: Via JavaScript (última opção)
+            # Método 3: Procurar no texto da página com HTML entities
+            if not user_id or not k2:
+                try:
+                    body_text = await page.text_content('body')
+                except Exception:
+                    body_text = None
+
+                if body_text:
+                    decoded_text = html.unescape(body_text)
+
+                    if not user_id:
+                        match = re.search(r'(?:&amp;|&)UserId=(\d+)', decoded_text)
+                        if match:
+                            user_id = match.group(1)
+                            logger.info(f"✅ UserID extraído do texto da página: {user_id}")
+
+                    if not k2:
+                        match = re.search(r'(?:&amp;|&)k2=([a-zA-Z0-9_-]+)', decoded_text)
+                        if match:
+                            k2 = match.group(1)
+                            logger.info(f"✅ k2 extraído do texto da página: {k2[:30]}...")
+
+            # Método 4: Via JavaScript (última opção)
             if not user_id or not k2:
                 try:
                     js_user_id = await page.evaluate("""
