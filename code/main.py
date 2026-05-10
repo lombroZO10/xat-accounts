@@ -1841,25 +1841,60 @@ class XATBrowserAutomation:
         try:
             logger.info("📝 Preenchendo formulário de registro...")
 
-            await page.wait_for_selector('form', timeout=10000)
+            # Esperar pelos campos mais prováveis do registro
+            await page.wait_for_selector(
+                'input[name="Username"], input[name="username"], input[name="user"], input[name="email"], input[type="email"]',
+                timeout=20000
+            )
 
             # Extrair k2 direto do formulário renderizado
             k2_value = await page.get_attribute('input[name="k2"]', 'value')
             if k2_value:
                 logger.info(f"✅ Token k2 extraído da página: {k2_value[:30]}...")
 
+            # Seletores mais específicos para evitar múltiplos formulários
+            username_selector = await self._find_first_selector(page, [
+                'input[name="Username"]',
+                'input[name="username"]',
+                'input[name="user"]',
+                'input[id="username"]'
+            ])
+            password_selector = await self._find_first_selector(page, [
+                'input[name="password"]',
+                'input[name="pass"]',
+                'input[name="passwd"]',
+                'input[id="password"]'
+            ])
+            password2_selector = await self._find_first_selector(page, [
+                'input[name="password2"]',
+                'input[name="pass2"]',
+                'input[name="confirm_password"]'
+            ])
+            email_selector = await self._find_first_selector(page, [
+                'input[name="email"]',
+                'input[id="email"]',
+                'input[type="email"]'
+            ])
+
+            if not username_selector or not password_selector or not email_selector:
+                logger.warning("⚠️ Seletor de formulário de registro não encontrado. Tentando usar campos genéricos.")
+                username_selector = username_selector or 'input[name="Username"]'
+                password_selector = password_selector or 'input[name="password"]'
+                password2_selector = password2_selector or 'input[name="password2"]'
+                email_selector = email_selector or 'input[name="email"]'
+
             # Preencher campos com typing humano
-            await self._type_with_delay(page, 'input[name="Username"]', username)
-            await self._type_with_delay(page, 'input[name="password"]', password)
-            await self._type_with_delay(page, 'input[name="password2"]', password)
-            await self._type_with_delay(page, 'input[name="email"]', email)
+            await self._type_with_delay(page, username_selector, username)
+            await self._type_with_delay(page, password_selector, password)
+            await self._type_with_delay(page, password2_selector, password)
+            await self._type_with_delay(page, email_selector, email)
 
             try:
                 await page.check('input[name="agree"]')
             except Exception:
                 pass
 
-            await page.wait_for_timeout(1000)
+            await page.wait_for_timeout(1500)
 
             await self._inject_captcha_token_if_missing(page)
 
@@ -1877,14 +1912,29 @@ class XATBrowserAutomation:
     async def _type_with_delay(self, page: Page, selector: str, value: str, delay: int = 120) -> None:
         """Preenche um campo usando digitação simulada."""
         try:
-            await page.wait_for_selector(selector, timeout=10000)
-            await page.click(selector, click_count=3)
-            await page.fill(selector, "")
+            locator = page.locator(selector).first
+            await locator.wait_for(timeout=20000)
+            await locator.scroll_into_view_if_needed()
+            await locator.click(click_count=3)
+            await locator.fill("")
             for char in value:
-                await page.type(selector, char, delay=random.randint(delay - 40, delay + 40))
+                await locator.type(char, delay=random.randint(delay - 40, delay + 40))
             await page.wait_for_timeout(200)
         except Exception:
-            await page.fill(selector, value)
+            try:
+                await page.fill(selector, value)
+            except Exception:
+                logger.warning(f"⚠️ Não foi possível preencher o campo {selector}")
+
+    async def _find_first_selector(self, page: Page, selectors: List[str]) -> Optional[str]:
+        """Retorna o primeiro seletor válido encontrado na página."""
+        for selector in selectors:
+            try:
+                if await page.locator(selector).first.count() > 0:
+                    return selector
+            except Exception:
+                continue
+        return None
 
     async def _extract_sitekey_from_page(self, page: Page) -> Optional[str]:
         """Extrai o sitekey do widget de Turnstile/Recaptcha na página."""
