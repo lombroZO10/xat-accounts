@@ -441,14 +441,14 @@ class XATAccountGenerator:
                         scraper_kwargs['proxies'] = current_proxy
                         scraper_response = self._fazer_requisicao_com_cloudscraper(method, url, **scraper_kwargs)
                         if scraper_response:
+                            self._sync_scraper_cookies_to_session()
                             return scraper_response
-                
-                resposta.raise_for_status()
-                return resposta
-                
+                    self._set_current_proxy(None)
+                else:
+                    resposta.raise_for_status()
+                    return resposta
             except Exception as e:
                 logger.warning(f"⚠️ Proxy atual falhou: {e}")
-                # Se proxy atual falhar, resetar e tentar outros
                 self._set_current_proxy(None)
         # Lógica original de rotação de proxies
         proxy_groups = []
@@ -489,6 +489,7 @@ class XATAccountGenerator:
                             scraper_kwargs['proxies'] = proxy
                             scraper_response = self._fazer_requisicao_com_cloudscraper(method, url, **scraper_kwargs)
                             if scraper_response:
+                                self._sync_scraper_cookies_to_session()
                                 return scraper_response
                         time.sleep(random.uniform(1, 3))
                         continue
@@ -590,6 +591,17 @@ class XATAccountGenerator:
         except Exception as e:
             logger.warning(f"⚠️ Erro no fallback cloudscraper: {e}")
             return None
+
+    def _sync_scraper_cookies_to_session(self) -> None:
+        """Sincroniza cookies coletados pelo cloudscraper para a sessão requests."""
+        try:
+            if self.scraper is not None and hasattr(self.scraper, 'cookies'):
+                cookies = self.scraper.cookies.get_dict()
+                if cookies:
+                    self.session.cookies.update(cookies)
+                    logger.debug("✅ Cookies do cloudscraper sincronizados para a sessão requests")
+        except Exception as e:
+            logger.warning(f"⚠️ Erro ao sincronizar cookies do cloudscraper: {e}")
     
     def obter_user_data(self) -> Optional[Dict[str, str]]:
         """
@@ -664,18 +676,7 @@ class XATAccountGenerator:
                 'Origin': self.BASE_URL,
             })
 
-            resposta = None
-            if self.scraper:
-                logger.info("🔄 Tentando acesso com cloudscraper primeiro")
-                resposta = self._fazer_requisicao_com_cloudscraper('GET', url, headers=headers)
-                if resposta and resposta.status_code == 200:
-                    logger.info("✅ Acesso com cloudscraper bem-sucedido")
-                else:
-                    logger.warning("⚠️ Cloudscraper falhou, tentando requests normal")
-
-            # Fallback para requests normal se cloudscraper falhou ou não está disponível
-            if not resposta or resposta.status_code != 200:
-                resposta = self._fazer_requisicao('GET', url, headers=headers)
+            resposta = self._fazer_requisicao('GET', url, headers=headers)
 
             if not resposta:
                 logger.error("❌ Falha ao acessar página de login")
@@ -751,8 +752,14 @@ class XATAccountGenerator:
             # Tentar extrair sitekey de reCAPTCHA da página de login
             self.last_recaptcha_sitekey = self._extrair_sitekey(texto_resposta)
             self.last_captcha_page_url = url
+            if not self.last_recaptcha_sitekey:
+                sitekey_from_js = self._extrair_sitekey_from_js_reference(texto_resposta, base_url=url)
+                if sitekey_from_js:
+                    self.last_recaptcha_sitekey = sitekey_from_js
+                    logger.info(f"✅ Sitekey de reCAPTCHA/Turnstile capturada de script JS: {self.last_recaptcha_sitekey}")
+
             if self.last_recaptcha_sitekey:
-                logger.info(f"✅ Sitekey de reCAPTCHA capturada da página de login: {self.last_recaptcha_sitekey}")
+                logger.info(f"✅ Sitekey de reCAPTCHA/Turnstile capturada da página de login: {self.last_recaptcha_sitekey}")
 
             # Tentar extrair k2 de input hidden
             input_k2 = soup.find('input', {'name': 'k2'}) or soup.find('input', {'id': 'k2'})
@@ -1001,7 +1008,7 @@ class XATAccountGenerator:
     def _detectar_recaptcha(self, texto: str) -> bool:
         texto_lower = texto.lower()
 
-        if 'data-sitekey=' in texto_lower or 'g-recaptcha' in texto_lower or 'h-captcha' in texto_lower:
+        if any(term in texto_lower for term in ['data-sitekey=', 'g-recaptcha', 'h-captcha', 'cf-turnstile', 'turnstile']):
             return True
 
         if 'registercap' in texto_lower and 'recaptcha' in texto_lower:
@@ -1013,14 +1020,46 @@ class XATAccountGenerator:
         return False
 
     def _extrair_sitekey(self, html: str) -> Optional[str]:
-        match = re.search(r'data-sitekey=["\']([^"\']+)["\']', html, re.IGNORECASE)
-        if match:
-            return match.group(1)
+        patterns = [
+            r'data-sitekey=["\']([^"\']+)["\']',
+            r'data-sitekey=(?:\\x22|["\'])([^"\\\']+)(?:\\x22|["\'])',
+            r'sitekey=(?:["\']?)([^"\'&>\s]+)(?:["\']?)'
+        ]
 
-        match = re.search(r'sitekey=(["\']?)([^"\'&>\s]+)\1', html, re.IGNORECASE)
-        if match:
-            return match.group(2)
+        for pattern in patterns:
+            match = re.search(pattern, html, re.IGNORECASE)
+            if match:
+                return match.group(1)
 
+        return None
+
+    def _extrair_sitekey_from_js_reference(self, html: str, base_url: str) -> Optional[str]:
+        """Extrai sitekey de scripts JS referenciados pela página de login."""
+        try:
+            soup = BeautifulSoup(html, 'html.parser')
+            script_tags = [tag.get('src') for tag in soup.find_all('script', src=True) if tag.get('src')]
+
+            for script_src in script_tags:
+                script_url = script_src
+                if script_src.startswith('//'):
+                    script_url = f"https:{script_src}"
+                elif script_src.startswith('/'):
+                    script_url = urljoin(self.BASE_URL, script_src)
+                elif not script_src.startswith('http'):
+                    script_url = urljoin(base_url, script_src)
+
+                logger.info(f"🔍 Tentando extrair sitekey de script {script_url}")
+                response = self._fazer_requisicao('GET', script_url)
+                if not response or response.status_code != 200:
+                    continue
+
+                js_text = self._decodificar_resposta(response)
+                sitekey = self._extrair_sitekey(js_text)
+                if sitekey:
+                    return sitekey
+
+        except Exception as e:
+            logger.warning(f"⚠️ Erro ao extrair sitekey de JS: {e}")
         return None
 
     def _resolver_recaptcha(self, sitekey: str, page_url: str) -> Optional[str]:
@@ -1036,12 +1075,13 @@ class XATAccountGenerator:
             return None
 
         try:
-            logger.info("🔐 Enviando desafio reCAPTCHA para 2captcha")
+            method = 'turnstile' if sitekey.startswith('0x') else 'userrecaptcha'
+            logger.info(f"🔐 Enviando desafio reCAPTCHA/Turnstile para 2captcha (method={method})")
             resposta = requests.get(
                 'http://2captcha.com/in.php',
                 params={
                     'key': api_key,
-                    'method': 'userrecaptcha',
+                    'method': method,
                     'googlekey': sitekey,
                     'pageurl': page_url,
                     'json': 1
