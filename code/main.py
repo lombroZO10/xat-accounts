@@ -1820,7 +1820,7 @@ class XATBrowserAutomation:
                 return False
 
             page_url = page.url
-            token = self._resolver_recaptcha(sitekey, page_url, proxies=self._get_requests_proxy_config())
+            token = self._resolver_recaptcha(sitekey, page_url)
             if not token:
                 reason = "Solver de captcha não retornou token"
                 logger.warning(f"⚠️ {reason}")
@@ -2014,7 +2014,7 @@ class XATBrowserAutomation:
             sitekey = await self._extract_sitekey_from_page(page)
             if sitekey:
                 page_url = page.url
-                token = self._resolver_recaptcha(sitekey, page_url, proxies=self._get_requests_proxy_config())
+                token = self._resolver_recaptcha(sitekey, page_url)
                 if token:
                     await self._inject_captcha_token(page, token)
                     logger.info("✅ Token de captcha injetado antes do envio do form")
@@ -2070,7 +2070,7 @@ class XATBrowserAutomation:
             else:
                 params['googlekey'] = sitekey
 
-            response = requests.get('http://2captcha.com/in.php', params=params, timeout=30, proxies=proxies)
+            response = requests.get('http://2captcha.com/in.php', params=params, timeout=90, proxies=proxies)
             data = response.json()
             if data.get('status') != 1:
                 logger.warning(f"⚠️ 2captcha in.php falhou: {data.get('request')}")
@@ -2087,7 +2087,7 @@ class XATBrowserAutomation:
                         'id': request_id,
                         'json': 1
                     },
-                    timeout=30,
+                    timeout=90,
                     proxies=proxies
                 )
                 status_data = status_resp.json()
