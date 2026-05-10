@@ -1853,22 +1853,22 @@ class XATBrowserAutomation:
 
             # Seletores mais específicos para evitar múltiplos formulários
             username_locator = await self._find_first_locator(page, [
+                'input[name="user"]',
                 'input[name="Username"]',
                 'input[name="username"]',
-                'input[name="user"]',
                 'input[id="username"]',
                 'input[type="text"]'
             ])
             password_locator = await self._find_first_locator(page, [
-                'input[name="password"]',
                 'input[name="pass"]',
+                'input[name="password"]',
                 'input[name="passwd"]',
                 'input[id="password"]',
                 'input[type="password"]'
             ])
             password2_locator = await self._find_first_locator(page, [
-                'input[name="password2"]',
                 'input[name="pass2"]',
+                'input[name="password2"]',
                 'input[name="confirm_password"]'
             ])
             email_locator = await self._find_first_locator(page, [
@@ -1879,9 +1879,9 @@ class XATBrowserAutomation:
 
             if not username_locator or not password_locator or not email_locator:
                 logger.warning("⚠️ Seletor de formulário de registro não encontrado. Tentando usar campos genéricos.")
-                username_locator = username_locator or page.locator('input[name="Username"], input[name="username"], input[name="user"], input[type="text"]').first
-                password_locator = password_locator or page.locator('input[name="password"], input[name="pass"], input[type="password"]').first
-                password2_locator = password2_locator or page.locator('input[name="password2"], input[name="pass2"], input[name="confirm_password"]').first
+                username_locator = username_locator or page.locator('input[name="user"], input[name="username"], input[name="Username"], input[type="text"]').first
+                password_locator = password_locator or page.locator('input[name="pass"], input[name="password"], input[type="password"]').first
+                password2_locator = password2_locator or page.locator('input[name="pass2"], input[name="password2"], input[name="confirm_password"]').first
                 email_locator = email_locator or page.locator('input[name="email"], input[type="email"]').first
 
             # Preencher campos com typing humano
@@ -1891,15 +1891,22 @@ class XATBrowserAutomation:
             await self._type_with_delay(page, email_locator, email)
 
             try:
-                await page.check('input[name="agree"]')
+                await page.locator('input[type="checkbox"]').first.check()
             except Exception:
-                pass
+                try:
+                    await page.check('input[name="agree"]')
+                except Exception:
+                    pass
 
             await page.wait_for_timeout(1500)
 
             await self._inject_captcha_token_if_missing(page)
 
-            await page.click('input[type="submit"], button[type="submit"], .submit-btn')
+            try:
+                await page.locator('button:has-text("register")').first.click()
+            except Exception:
+                await page.click('input[type="submit"], button[type="submit"], .submit-btn')
+
             await page.wait_for_load_state('networkidle')
             await self._monitor_submission_result(page)
 
