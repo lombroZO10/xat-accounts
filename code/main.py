@@ -15,7 +15,7 @@ import importlib.util
 import asyncio
 from datetime import datetime
 from pathlib import Path
-from typing import List, Dict, Optional, Tuple
+from typing import List, Dict, Optional, Tuple, Set
 from urllib.parse import urljoin, parse_qs, urlparse
 from bs4 import BeautifulSoup
 
@@ -37,6 +37,8 @@ PROJECT_ROOT = Path(__file__).resolve().parents[1]
 DATA_DIR = PROJECT_ROOT / 'data'
 CONFIG_DIR = PROJECT_ROOT / 'config'
 LOG_FILE = PROJECT_ROOT / 'criacao_contas.log'
+BAD_PROXIES_FILE = DATA_DIR / 'bad_proxies.log'
+SHADOWBAN_LOG_FILE = DATA_DIR / 'shadowban.log'
 
 DEFAULT_CONFIG = {
     "delays": {
@@ -1344,13 +1346,23 @@ class XATBrowserAutomation:
     AUSER_URL = f"{BASE_URL}/web_gear/chat/auser3.php"
     LOGIN_URL = f"{BASE_URL}/login"
 
-    def __init__(self, config: Dict, proxies: List[str]):
+    def __init__(self, config: Dict, proxies: List[str], bad_proxies: Optional[Set[str]] = None):
         self.config = config
-        self.proxies = proxies
+        self.proxies = [p for p in proxies if p not in (bad_proxies or set())]
+        self.bad_proxies: Set[str] = bad_proxies or set()
         self.playwright = None
         self.browser = None
         self.context = None
         self.current_proxy = None
+        self.last_login_block_reason: Optional[str] = None
+        self.last_captcha_block_reason: Optional[str] = None
+        self.user_agents = [
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:122.0) Gecko/20100101 Firefox/122.0",
+            "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+            "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Edge/120.0.0.0"
+        ]
 
         if not PLAYWRIGHT_AVAILABLE:
             raise ImportError("❌ Playwright não está instalado. Execute: pip install playwright playwright-stealth")
@@ -1368,51 +1380,8 @@ class XATBrowserAutomation:
         """Inicializa o navegador Playwright com stealth"""
         try:
             self.playwright = await async_playwright().start()
-
-            # Configurar proxy se disponível
-            proxy_config = None
-            if self.proxies and self.config['browser_automation'].get('proxy_rotation', True):
-                self.current_proxy = random.choice(self.proxies)
-                proxy_parts = self.current_proxy.split(':')
-                if len(proxy_parts) >= 4:
-                    proxy_config = {
-                        'server': f'http://{proxy_parts[0]}:{proxy_parts[1]}',
-                        'username': proxy_parts[2],
-                        'password': proxy_parts[3]
-                    }
-                    logger.info(f"🌐 Usando proxy: {proxy_parts[0]}:{proxy_parts[1]}")
-
-            # Configurações do navegador
-            browser_args = [
-                '--no-sandbox',
-                '--disable-setuid-sandbox',
-                '--disable-dev-shm-usage',
-                '--disable-accelerated-2d-canvas',
-                '--no-first-run',
-                '--no-zygote',
-                '--disable-gpu',
-                '--disable-web-security',
-                '--disable-features=VizDisplayCompositor'
-            ]
-
-            self.browser = await self.playwright.chromium.launch(
-                headless=self.config['browser_automation'].get('headless', True),
-                args=browser_args,
-                proxy=proxy_config
-            )
-
-            # Criar contexto com configurações stealth
-            self.context = await self.browser.new_context(
-                viewport={'width': 1920, 'height': 1080},
-                user_agent='Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-                locale='pt-BR',
-                timezone_id='America/Sao_Paulo'
-            )
-
-            # Aplicar stealth
-            stealth_config = Stealth()
-            await stealth_config.apply_stealth_async(self.context)
-
+            self._choose_next_proxy(exclude_current=False)
+            await self._create_browser_context()
             logger.info("✅ Navegador Playwright inicializado com stealth")
 
         except Exception as e:
@@ -1432,37 +1401,191 @@ class XATBrowserAutomation:
         except Exception as e:
             logger.warning(f"⚠️ Erro ao limpar recursos: {e}")
 
+    def _choose_next_proxy(self, exclude_current: bool = True) -> Optional[str]:
+        """Escolhe o próximo proxy da lista, evitando o atual se possível."""
+        if not self.proxies:
+            return None
+
+        options = [p for p in self.proxies if p != self.current_proxy] if exclude_current else list(self.proxies)
+        if not options:
+            options = list(self.proxies)
+
+        self.current_proxy = random.choice(options)
+        logger.info(f"🌐 Proxy selecionado: {self.current_proxy.split(':')[0]}:{self.current_proxy.split(':')[1]}")
+        return self.current_proxy
+
+    def _build_proxy_settings(self, proxy: Optional[str]) -> Optional[Dict[str, str]]:
+        """Constrói as configurações de proxy para o Playwright."""
+        if not proxy:
+            return None
+
+        parts = proxy.split(':')
+        if len(parts) >= 4:
+            return {
+                'server': f'http://{parts[0]}:{parts[1]}',
+                'username': parts[2],
+                'password': parts[3]
+            }
+        if len(parts) >= 2:
+            return {
+                'server': f'http://{parts[0]}:{parts[1]}'
+            }
+        return None
+
+    async def _create_browser_context(self) -> None:
+        """Cria ou recria o navegador/contexto Playwright com o proxy atual."""
+        if self.context:
+            await self.context.close()
+            self.context = None
+        if self.browser:
+            await self.browser.close()
+            self.browser = None
+
+        proxy_config = self._build_proxy_settings(self.current_proxy)
+        browser_args = [
+            '--no-sandbox',
+            '--disable-setuid-sandbox',
+            '--disable-dev-shm-usage',
+            '--disable-accelerated-2d-canvas',
+            '--no-first-run',
+            '--no-zygote',
+            '--disable-gpu',
+            '--disable-web-security',
+            '--disable-features=VizDisplayCompositor'
+        ]
+
+        self.browser = await self.playwright.chromium.launch(
+            headless=self.config['browser_automation'].get('headless', True),
+            args=browser_args,
+            proxy=proxy_config
+        )
+
+        self.context = await self.browser.new_context(
+            viewport={'width': 1920, 'height': 1080},
+            user_agent=random.choice(self.user_agents),
+            locale='pt-BR',
+            timezone_id='America/Sao_Paulo'
+        )
+
+        stealth_config = Stealth()
+        await stealth_config.apply_stealth_async(self.context)
+
+    async def _rotate_proxy_and_recreate(self) -> bool:
+        """Seleciona um novo proxy e recria o contexto do navegador."""
+        if not self.proxies:
+            logger.error("❌ Nenhum proxy disponível para rotacionar")
+            return False
+
+        self._choose_next_proxy()
+        try:
+            await self._create_browser_context()
+            logger.info("🔄 Proxy rotacionado e contexto recriado")
+            return True
+        except Exception as e:
+            logger.error(f"❌ Falha ao recriar contexto com novo proxy: {e}")
+            return False
+
+    def _blacklist_current_proxy(self, reason: str) -> None:
+        """Adiciona o proxy atual à blacklist e registra no log."""
+        if not self.current_proxy:
+            return
+
+        if self.current_proxy in self.bad_proxies:
+            return
+
+        self.bad_proxies.add(self.current_proxy)
+        if self.current_proxy in self.proxies:
+            self.proxies.remove(self.current_proxy)
+
+        try:
+            BAD_PROXIES_FILE.parent.mkdir(parents=True, exist_ok=True)
+            with open(BAD_PROXIES_FILE, 'a', encoding='utf-8') as f:
+                f.write(f"{self.current_proxy}  # {reason}  [{datetime.utcnow().isoformat()}]\n")
+            logger.warning(f"🚫 Proxy blacklistado: {self.current_proxy} ({reason})")
+        except Exception as e:
+            logger.warning(f"⚠️ Não foi possível gravar bad_proxies.log: {e}")
+
+    def _log_shadowban(self, username: str, email: str, reason: str) -> None:
+        """Registra suspeita de shadowban em arquivo dedicado."""
+        try:
+            SHADOWBAN_LOG_FILE.parent.mkdir(parents=True, exist_ok=True)
+            with open(SHADOWBAN_LOG_FILE, 'a', encoding='utf-8') as f:
+                f.write(f"{datetime.utcnow().isoformat()} | {username} | {email} | {reason}\n")
+            logger.warning(f"⚠️ Possível shadowban detectado para {username}: {reason}")
+        except Exception as e:
+            logger.warning(f"⚠️ Não foi possível gravar shadowban.log: {e}")
+
     async def create_account(self, username: str, password: str, email: str) -> bool:
         """Cria conta XAT usando automação de navegador"""
         try:
             logger.info(f"🎭 Iniciando criação de conta: {username} | {email}")
 
-            # Criar nova página
+            max_proxy_retries = self.config['browser_automation'].get('max_proxy_retries', 3)
             page = await self.context.new_page()
             page.set_default_timeout(self.config['browser_automation'].get('page_timeout', 30000))
 
-            # Passo 1: Obter UserID/k2
-            user_data = await self._get_user_data(page)
-            if not user_data:
+            # Passo 1: Obter UserID/k2 com retry de proxy em caso de bloqueio
+            user_data = None
+            for attempt in range(max_proxy_retries):
+                user_data = await self._get_user_data(page)
+                if user_data:
+                    break
+
+                logger.warning(f"⚠️ Falha ao obter UserID/k2 no attempt {attempt + 1}/{max_proxy_retries}")
                 await page.close()
-                return False
+                if attempt == max_proxy_retries - 1:
+                    return False
+                if not await self._rotate_proxy_and_recreate():
+                    return False
+                page = await self.context.new_page()
+                page.set_default_timeout(self.config['browser_automation'].get('page_timeout', 30000))
 
             user_id = user_data.get('UserId')
             k2_token = user_data.get('k2')
 
-            # Aguardar entre requisições
             await self._random_delay()
 
-            # Passo 2: Acessar página de login
-            success = await self._access_login_page(page, user_id, k2_token)
-            if not success:
+            # Passo 2: Acessar página de login com retry de proxy ao detectar bloqueio ou shadowban
+            login_success = False
+            for attempt in range(max_proxy_retries):
+                login_success = await self._access_login_page(page, user_id, k2_token)
+                if login_success:
+                    break
+
+                logger.warning(f"⚠️ Bloqueio na página de login detectado no attempt {attempt + 1}/{max_proxy_retries}")
                 await page.close()
+                if attempt == max_proxy_retries - 1:
+                    return False
+                if not await self._rotate_proxy_and_recreate():
+                    return False
+                page = await self.context.new_page()
+                page.set_default_timeout(self.config['browser_automation'].get('page_timeout', 30000))
+
+            if not login_success:
                 return False
 
-            # Aguardar carregamento e resolução de captcha
-            captcha_resolved = await self._wait_for_captcha_resolution(page)
+            # Aguardar carregamento do widget e resolver captcha
+            captcha_resolved = False
+            for attempt in range(max_proxy_retries):
+                captcha_resolved = await self._wait_for_captcha_resolution(page)
+                if captcha_resolved:
+                    break
+
+                logger.warning(f"⚠️ Widget de Turnstile não carregou ou captcha não foi resolvido no attempt {attempt + 1}/{max_proxy_retries}")
+                await page.close()
+                if attempt == max_proxy_retries - 1:
+                    return False
+                if not await self._rotate_proxy_and_recreate():
+                    return False
+                page = await self.context.new_page()
+                page.set_default_timeout(self.config['browser_automation'].get('page_timeout', 30000))
+                login_success = await self._access_login_page(page, user_id, k2_token)
+                if not login_success:
+                    continue
+
             if not captcha_resolved:
-                logger.warning("⚠️ Captcha não resolvido. Abortando criação de conta.")
+                reason = self.last_captcha_block_reason or "Falha na resolução do captcha"
+                logger.warning(f"⚠️ Captcha não resolvido. Abortando criação de conta. Motivo: {reason}")
                 await page.close()
                 return False
 
@@ -1473,7 +1596,7 @@ class XATBrowserAutomation:
                 return False
 
             # Passo 4: Verificar resultado
-            result = await self._verify_registration_result(page, username)
+            result = await self._verify_registration_result(page, username, email)
             await page.close()
 
             return result
@@ -1537,75 +1660,111 @@ class XATBrowserAutomation:
             logger.info(f"🔗 Acessando página de login com UserId: {user_id}")
 
             login_url = f"{self.LOGIN_URL}?mode=1&UserId={user_id}&k2={k2_token}"
-            await page.goto(login_url, wait_until='networkidle')
+            response = await page.goto(login_url, wait_until='networkidle')
 
-            # Verificar se página carregou corretamente
+            if response and response.status in [403, 503]:
+                reason = f"Status de bloqueio na página de login: {response.status}"
+                logger.warning(f"⚠️ {reason}")
+                self.last_login_block_reason = reason
+                self._blacklist_current_proxy(reason)
+                return False
+
             title = await page.title()
             if 'login' in title.lower() or 'xat' in title.lower():
                 logger.info("✅ Página de login carregada com sucesso")
-                return True
             else:
                 logger.warning(f"⚠️ Página suspeita carregada: {title}")
-                return False
+
+            # Extrair k2 do formulário renderizado, se disponível
+            k2_page = await page.get_attribute('input[name="k2"]', 'value')
+            if k2_page:
+                logger.info(f"✅ Token k2 obtido da página de login: {k2_page[:30]}...")
+
+            # Extrair sitekey do widget presente na página
+            sitekey = await self._extract_sitekey_from_page(page)
+            if sitekey:
+                logger.info(f"✅ Sitekey extraída do login via navegador: {sitekey}")
+
+            return True
 
         except Exception as e:
             logger.error(f"❌ Erro ao acessar página de login: {e}")
             return False
 
     async def _wait_for_captcha_resolution(self, page: Page) -> bool:
-        """Aguarda resolução automática do captcha pelo navegador"""
+        """Resolve o captcha usando solver e injeta o token no formulário."""
         try:
-            logger.info("🔒 Aguardando resolução automática do captcha...")
+            if not self.config['captcha_solver'].get('enabled', False):
+                logger.warning("⚠️ Solver de captcha não está habilitado na configuração")
+                return False
 
+            logger.info("🔒 Aguardando carregamento do widget de captcha...")
             captcha_timeout = self.config['browser_automation'].get('captcha_timeout', 120)
 
-            # Aguardar até que não haja mais elementos de captcha visíveis
             await page.wait_for_function(
                 """
                 () => {
-                    const turnstile = document.querySelector('[data-sitekey]');
-                    const recaptcha = document.querySelector('.g-recaptcha, #captcha');
-                    return !turnstile && !recaptcha;
+                    return document.querySelector('[data-sitekey]') || document.querySelector('.g-recaptcha') || document.querySelector('iframe[src*="turnstile"]');
                 }
                 """,
-                timeout=captcha_timeout * 1000
+                timeout=10000
             )
 
-            logger.info("✅ Captcha resolvido automaticamente pelo navegador")
+            sitekey = await self._extract_sitekey_from_page(page)
+            if not sitekey:
+                reason = "Turnstile widget não carregou / sitekey não encontrado"
+                logger.warning(f"⚠️ {reason}")
+                self.last_captcha_block_reason = reason
+                self._blacklist_current_proxy(reason)
+                return False
+
+            page_url = page.url
+            token = self._resolver_recaptcha(sitekey, page_url, proxies=self._get_requests_proxy_config())
+            if not token:
+                reason = "Solver de captcha não retornou token"
+                logger.warning(f"⚠️ {reason}")
+                self.last_captcha_block_reason = reason
+                self._blacklist_current_proxy(reason)
+                return False
+
+            await self._inject_captcha_token(page, token)
+            logger.info("✅ Token de captcha injetado na página")
             return True
 
         except Exception as e:
-            logger.warning(f"⚠️ Timeout aguardando resolução do captcha: {e}")
+            logger.warning(f"⚠️ Erro ao resolver captcha: {e}")
             return False
 
     async def _fill_registration_form(self, page: Page, username: str, password: str, email: str) -> bool:
-        """Preenche e submete o formulário de registro"""
+        """Preenche e submete o formulário de registro usando digitação simulada."""
         try:
             logger.info("📝 Preenchendo formulário de registro...")
 
-            # Aguardar formulário estar disponível
             await page.wait_for_selector('form', timeout=10000)
 
-            # Preencher campos
-            await page.fill('input[name="Username"]', username)
-            await page.fill('input[name="password"]', password)
-            await page.fill('input[name="password2"]', password)
-            await page.fill('input[name="email"]', email)
+            # Extrair k2 direto do formulário renderizado
+            k2_value = await page.get_attribute('input[name="k2"]', 'value')
+            if k2_value:
+                logger.info(f"✅ Token k2 extraído da página: {k2_value[:30]}...")
 
-            # Marcar checkbox de termos se existir
+            # Preencher campos com typing humano
+            await self._type_with_delay(page, 'input[name="Username"]', username)
+            await self._type_with_delay(page, 'input[name="password"]', password)
+            await self._type_with_delay(page, 'input[name="password2"]', password)
+            await self._type_with_delay(page, 'input[name="email"]', email)
+
             try:
                 await page.check('input[name="agree"]')
-            except:
-                pass  # Checkbox pode não existir
+            except Exception:
+                pass
 
-            # Aguardar um pouco antes de submeter
-            await page.wait_for_timeout(2000)
+            await page.wait_for_timeout(1000)
 
-            # Submeter formulário
+            await self._inject_captcha_token_if_missing(page)
+
             await page.click('input[type="submit"], button[type="submit"], .submit-btn')
-
-            # Aguardar resposta
             await page.wait_for_load_state('networkidle')
+            await self._monitor_submission_result(page)
 
             logger.info("✅ Formulário submetido")
             return True
@@ -1614,7 +1773,183 @@ class XATBrowserAutomation:
             logger.error(f"❌ Erro ao preencher formulário: {e}")
             return False
 
-    async def _verify_registration_result(self, page: Page, username: str) -> bool:
+    async def _type_with_delay(self, page: Page, selector: str, value: str, delay: int = 120) -> None:
+        """Preenche um campo usando digitação simulada."""
+        try:
+            await page.wait_for_selector(selector, timeout=10000)
+            await page.click(selector, click_count=3)
+            await page.fill(selector, "")
+            for char in value:
+                await page.type(selector, char, delay=random.randint(delay - 40, delay + 40))
+            await page.wait_for_timeout(200)
+        except Exception:
+            await page.fill(selector, value)
+
+    async def _extract_sitekey_from_page(self, page: Page) -> Optional[str]:
+        """Extrai o sitekey do widget de Turnstile/Recaptcha na página."""
+        try:
+            sitekey = await page.evaluate(
+                """
+                () => {
+                    const widget = document.querySelector('[data-sitekey]');
+                    if (widget) {
+                        return widget.dataset.sitekey || widget.getAttribute('data-sitekey');
+                    }
+                    const recaptcha = document.querySelector('.g-recaptcha');
+                    if (recaptcha) {
+                        return recaptcha.getAttribute('data-sitekey');
+                    }
+                    const iframe = document.querySelector('iframe[src*="turnstile"]');
+                    if (iframe) {
+                        try {
+                            return new URL(iframe.src).searchParams.get('sitekey');
+                        } catch (e) {
+                            return null;
+                        }
+                    }
+                    const turnstile = document.querySelector('[data-sitekey]');
+                    if (turnstile) {
+                        return turnstile.dataset.sitekey || turnstile.getAttribute('data-sitekey');
+                    }
+                    return null;
+                }
+                """
+            )
+            return sitekey
+        except Exception as e:
+            logger.warning(f"⚠️ Erro ao extrair sitekey do DOM: {e}")
+            return None
+
+    async def _inject_captcha_token(self, page: Page, token: str) -> None:
+        """Injeta o token do solver nos campos escondidos do formulário."""
+        await page.evaluate(
+            """
+            (token) => {
+                const fields = [
+                    'textarea[name="cf-turnstile-response"]',
+                    'input[name="cf-turnstile-response"]',
+                    'textarea[name="g-recaptcha-response"]',
+                    'input[name="g-recaptcha-response"]'
+                ];
+
+                fields.forEach(selector => {
+                    let element = document.querySelector(selector);
+                    if (!element) {
+                        const tag = selector.startsWith('textarea') ? 'textarea' : 'input';
+                        element = document.createElement(tag);
+                        element.setAttribute('name', selector.includes('cf-turnstile-response') ? 'cf-turnstile-response' : 'g-recaptcha-response');
+                        element.style.display = 'none';
+                        if (tag === 'textarea') {
+                            element.value = token;
+                        } else {
+                            element.value = token;
+                        }
+                        document.body.appendChild(element);
+                    } else {
+                        element.value = token;
+                    }
+                    element.dispatchEvent(new Event('input', { bubbles: true }));
+                    element.dispatchEvent(new Event('change', { bubbles: true }));
+                });
+            }
+            """,
+            token
+        )
+
+    async def _inject_captcha_token_if_missing(self, page: Page) -> None:
+        """Garante que o token de captcha está presente antes de submeter o formulário."""
+        token_field = await page.query_selector('textarea[name="cf-turnstile-response"], input[name="cf-turnstile-response"], textarea[name="g-recaptcha-response"], input[name="g-recaptcha-response"]')
+        if not token_field:
+            sitekey = await self._extract_sitekey_from_page(page)
+            if sitekey:
+                page_url = page.url
+                token = self._resolver_recaptcha(sitekey, page_url, proxies=self._get_requests_proxy_config())
+                if token:
+                    await self._inject_captcha_token(page, token)
+                    logger.info("✅ Token de captcha injetado antes do envio do form")
+
+    def _get_requests_proxy_config(self) -> Optional[Dict[str, str]]:
+        """Retorna configuração de proxy compatível com requests, a partir do proxy atual do Playwright."""
+        if not self.current_proxy:
+            return None
+
+        parts = self.current_proxy.split(':')
+        if len(parts) < 2:
+            return None
+
+        server = f'http://{parts[0]}:{parts[1]}'
+        if len(parts) >= 4:
+            auth = f'{parts[2]}:{parts[3]}@'
+            server = f'http://{auth}{parts[0]}:{parts[1]}'
+
+        return {
+            'http': server,
+            'https': server
+        }
+
+    def _resolver_recaptcha(self, sitekey: str, page_url: str, proxies: Optional[Dict[str, str]] = None) -> Optional[str]:
+        """Resolve reCAPTCHA/Turnstile usando 2captcha."""
+        provider = self.config['captcha_solver'].get('provider', '2captcha')
+        api_key = self.config['captcha_solver'].get('api_key', '')
+
+        if provider != '2captcha':
+            logger.warning(f"⚠️ Provedor de captcha não suportado: {provider}")
+            return None
+
+        if not api_key:
+            logger.warning("⚠️ chave API de captcha não configurada em config.json")
+            return None
+
+        try:
+            method = 'turnstile' if sitekey.startswith('0x') else 'userrecaptcha'
+            logger.info(f"🔐 Enviando desafio reCAPTCHA/Turnstile para 2captcha (method={method}, sitekey={sitekey[:20]}..., pageurl={page_url})")
+            params = {
+                'key': api_key,
+                'method': method,
+                'pageurl': page_url,
+                'json': 1
+            }
+            if method == 'turnstile':
+                params['sitekey'] = sitekey
+            else:
+                params['googlekey'] = sitekey
+
+            response = requests.get('http://2captcha.com/in.php', params=params, timeout=30, proxies=proxies)
+            data = response.json()
+            if data.get('status') != 1:
+                logger.warning(f"⚠️ 2captcha in.php falhou: {data.get('request')}")
+                return None
+
+            request_id = data.get('request')
+            for _ in range(24):
+                time.sleep(5)
+                status_resp = requests.get(
+                    'http://2captcha.com/res.php',
+                    params={
+                        'key': api_key,
+                        'action': 'get',
+                        'id': request_id,
+                        'json': 1
+                    },
+                    timeout=30,
+                    proxies=proxies
+                )
+                status_data = status_resp.json()
+                if status_data.get('status') == 1:
+                    logger.info("✅ Retorno de reCAPTCHA recebido")
+                    return status_data.get('request')
+                if status_data.get('request') not in ['CAPCHA_NOT_READY', 'CAPTCHA_NOT_READY']:
+                    logger.warning(f"⚠️ 2captcha erro: {status_data.get('request')}")
+                    return None
+
+            logger.warning("⚠️ Tempo esgotado aguardando 2captcha")
+            return None
+
+        except Exception as e:
+            logger.warning(f"⚠️ Erro no solver de reCAPTCHA: {e}")
+            return None
+
+    async def _verify_registration_result(self, page: Page, username: str, email: str) -> bool:
         """Verifica se a conta foi criada com sucesso"""
         try:
             content = await page.content()
@@ -1652,18 +1987,66 @@ class XATBrowserAutomation:
             error_found = any(indicator.lower() in text_content.lower() for indicator in error_indicators)
 
             if success_found and not error_found:
+                if any(term in text_content.lower() for term in ['check your email', 'confirm your email', 'verifique seu email', 'confirme seu email']):
+                    logger.warning(f"⚠️ Conta parece ter sido aceita, mas requer confirmação de email: {username}")
+                    self._log_shadowban(username, email, 'Possível shadowban ou bloqueio silencioso após aceitação do formulário')
                 logger.info(f"✅ Conta criada com sucesso: {username}")
                 return True
             elif error_found:
                 logger.warning(f"⚠️ Erro detectado na criação da conta: {username}")
                 return False
             else:
-                logger.info(f"ℹ️ Status da criação indefinido para: {username}")
+                logger.warning(f"⚠️ Status da criação indefinido para: {username} - possivel shadowban")
+                self._log_shadowban(username, email, 'Status indefinido após submissão de registro')
                 return False
 
         except Exception as e:
             logger.error(f"❌ Erro ao verificar resultado: {e}")
             return False
+
+    async def _monitor_submission_result(self, page: Page) -> None:
+        """Monitora a submissão do formulário para detectar sucesso ou erro imediato."""
+        try:
+            expected_success = ['welcome', 'home', 'success']
+            error_selectors = [
+                'div.alert-danger',
+                '.alert.alert-danger',
+                '.error',
+                '.field-error',
+                '.has-error',
+                '.error-message'
+            ]
+
+            try:
+                await page.wait_for_function(
+                    """
+                    () => {
+                        const url = window.location.href.toLowerCase();
+                        return url.includes('welcome') || url.includes('home') || url.includes('success');
+                    }
+                    """,
+                    timeout=15000
+                )
+                logger.info("✅ URL de sucesso detectada após submissão")
+                return
+            except Exception:
+                pass
+
+            for selector in error_selectors:
+                try:
+                    const_error = await page.query_selector(selector)
+                    if const_error:
+                        text = await const_error.text_content()
+                        logger.warning(f"⚠️ Erro visível detectado após submissão: {text.strip() if text else 'sem texto'}")
+                        return
+                except Exception:
+                    continue
+
+            current_url = page.url.lower()
+            if any(keyword in current_url for keyword in expected_success):
+                logger.info("✅ URL de sucesso detectada após submissão")
+        except Exception as e:
+            logger.warning(f"⚠️ Falha ao monitorar submissão: {e}")
 
     async def _random_delay(self):
         """Aguarda delay aleatório entre ações"""
@@ -1723,6 +2106,25 @@ async def run_browser_automation(config: Dict):
             with open(proxy_file, 'r', encoding='utf-8') as f:
                 proxies = [line.strip() for line in f.readlines() if line.strip() and not line.strip().startswith('#')]
 
+        # Carregar bad proxies
+        bad_proxies: Set[str] = set()
+        if BAD_PROXIES_FILE.exists():
+            with open(BAD_PROXIES_FILE, 'r', encoding='utf-8') as f:
+                bad_proxies = {
+                    line.split('#', 1)[0].strip()
+                    for line in f.readlines()
+                    if line.strip() and not line.strip().startswith('#')
+                }
+        if bad_proxies:
+            logger.info(f"🛑 Blacklist de proxies carregada: {len(bad_proxies)} proxy(s) banido(s)")
+            logger.info(f"📝 Proxies blacklistados: {', '.join(list(bad_proxies)[:10])}{'...' if len(bad_proxies) > 10 else ''}")
+            original_count = len(proxies)
+            proxies = [p for p in proxies if p not in bad_proxies]
+            logger.info(f"ℹ️ Filtrados {original_count - len(proxies)} proxies blacklistados de bad_proxies.log")
+            if proxy_file.exists() and original_count > 0 and not proxies:
+                logger.error("❌ Nenhum proxy válido disponível após filtrar bad_proxies.log")
+                return
+
         # Carregar emails
         emails = []
         email_file = DATA_DIR / 'emails.txt'
@@ -1748,7 +2150,7 @@ async def run_browser_automation(config: Dict):
         logger.info(f"📧 Processando {len(emails)} emails com {len(usernames)} usernames disponíveis")
 
         # Inicializar automação
-        async with XATBrowserAutomation(config, proxies) as automation:
+        async with XATBrowserAutomation(config, proxies, bad_proxies) as automation:
             contas_criadas = 0
 
             for i, email in enumerate(emails, 1):
