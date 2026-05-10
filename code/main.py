@@ -11,11 +11,21 @@ import logging
 import time
 import requests
 import importlib.util
+import asyncio
 from datetime import datetime
 from pathlib import Path
 from typing import List, Dict, Optional, Tuple
 from urllib.parse import urljoin, parse_qs, urlparse
 from bs4 import BeautifulSoup
+
+# Playwright imports
+try:
+    from playwright.async_api import async_playwright, Browser, Page, BrowserContext
+    from playwright_stealth import Stealth
+    PLAYWRIGHT_AVAILABLE = True
+except ImportError:
+    PLAYWRIGHT_AVAILABLE = False
+    async_playwright = None
 
 if importlib.util.find_spec('cloudscraper') is not None:
     cloudscraper = importlib.import_module('cloudscraper')
@@ -47,6 +57,13 @@ DEFAULT_CONFIG = {
         "health_check": False,
         "use_public_fallback": True,
         "force_proxy": True  # Forçar uso de proxy em todas as requisições
+    },
+    "browser_automation": {
+        "enabled": True,
+        "headless": True,
+        "proxy_rotation": True,
+        "captcha_timeout": 120,
+        "page_timeout": 30000
     },
     "captcha_solver": {
         "enabled": False,
@@ -1313,25 +1330,451 @@ class XATAccountGenerator:
         return True
 
 
+class XATBrowserAutomation:
+    """Automação de navegador para XAT usando Playwright"""
+
+    BASE_URL = "https://xat.com"
+    AUSER_URL = f"{BASE_URL}/web_gear/chat/auser3.php"
+    LOGIN_URL = f"{BASE_URL}/login"
+
+    def __init__(self, config: Dict, proxies: List[str]):
+        self.config = config
+        self.proxies = proxies
+        self.playwright = None
+        self.browser = None
+        self.context = None
+        self.current_proxy = None
+
+        if not PLAYWRIGHT_AVAILABLE:
+            raise ImportError("❌ Playwright não está instalado. Execute: pip install playwright playwright-stealth")
+
+        logger.info("🎭 XAT Browser Automation inicializado")
+
+    async def __aenter__(self):
+        await self.initialize()
+        return self
+
+    async def __aexit__(self, exc_type, exc_val, exc_tb):
+        await self.cleanup()
+
+    async def initialize(self):
+        """Inicializa o navegador Playwright com stealth"""
+        try:
+            self.playwright = await async_playwright().start()
+
+            # Configurar proxy se disponível
+            proxy_config = None
+            if self.proxies and self.config['browser_automation'].get('proxy_rotation', True):
+                self.current_proxy = random.choice(self.proxies)
+                proxy_parts = self.current_proxy.split(':')
+                if len(proxy_parts) >= 4:
+                    proxy_config = {
+                        'server': f'http://{proxy_parts[0]}:{proxy_parts[1]}',
+                        'username': proxy_parts[2],
+                        'password': proxy_parts[3]
+                    }
+                    logger.info(f"🌐 Usando proxy: {proxy_parts[0]}:{proxy_parts[1]}")
+
+            # Configurações do navegador
+            browser_args = [
+                '--no-sandbox',
+                '--disable-setuid-sandbox',
+                '--disable-dev-shm-usage',
+                '--disable-accelerated-2d-canvas',
+                '--no-first-run',
+                '--no-zygote',
+                '--disable-gpu',
+                '--disable-web-security',
+                '--disable-features=VizDisplayCompositor'
+            ]
+
+            self.browser = await self.playwright.chromium.launch(
+                headless=self.config['browser_automation'].get('headless', True),
+                args=browser_args,
+                proxy=proxy_config
+            )
+
+            # Criar contexto com configurações stealth
+            self.context = await self.browser.new_context(
+                viewport={'width': 1920, 'height': 1080},
+                user_agent='Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+                locale='pt-BR',
+                timezone_id='America/Sao_Paulo'
+            )
+
+            # Aplicar stealth
+            stealth_config = Stealth()
+            await stealth_config.apply_stealth_async(self.context)
+
+            logger.info("✅ Navegador Playwright inicializado com stealth")
+
+        except Exception as e:
+            logger.error(f"❌ Erro ao inicializar navegador: {e}")
+            raise
+
+    async def cleanup(self):
+        """Limpa recursos do navegador"""
+        try:
+            if self.context:
+                await self.context.close()
+            if self.browser:
+                await self.browser.close()
+            if self.playwright:
+                await self.playwright.stop()
+            logger.info("🧹 Recursos do navegador liberados")
+        except Exception as e:
+            logger.warning(f"⚠️ Erro ao limpar recursos: {e}")
+
+    async def create_account(self, username: str, password: str, email: str) -> bool:
+        """Cria conta XAT usando automação de navegador"""
+        try:
+            logger.info(f"🎭 Iniciando criação de conta: {username} | {email}")
+
+            # Criar nova página
+            page = await self.context.new_page()
+            await page.set_default_timeout(self.config['browser_automation'].get('page_timeout', 30000))
+
+            # Passo 1: Obter UserID/k2
+            user_data = await self._get_user_data(page)
+            if not user_data:
+                await page.close()
+                return False
+
+            user_id = user_data.get('UserId')
+            k2_token = user_data.get('k2')
+
+            # Aguardar entre requisições
+            await self._random_delay()
+
+            # Passo 2: Acessar página de login
+            success = await self._access_login_page(page, user_id, k2_token)
+            if not success:
+                await page.close()
+                return False
+
+            # Aguardar carregamento e resolução de captcha
+            await self._wait_for_captcha_resolution(page)
+
+            # Passo 3: Preencher e submeter formulário
+            success = await self._fill_registration_form(page, username, password, email)
+            if not success:
+                await page.close()
+                return False
+
+            # Passo 4: Verificar resultado
+            result = await self._verify_registration_result(page, username)
+            await page.close()
+
+            return result
+
+        except Exception as e:
+            logger.error(f"❌ Erro na automação: {e}")
+            return False
+
+    async def _get_user_data(self, page: Page) -> Optional[Dict]:
+        """Obtém UserID e k2 via auser3.php"""
+        try:
+            logger.info("🔗 Obtendo UserID/k2 via navegador")
+
+            # Acessar auser3.php
+            await page.goto(self.AUSER_URL, wait_until='networkidle')
+
+            # Aguardar resposta JSON
+            response = await page.wait_for_load_state('networkidle')
+
+            # Extrair dados da resposta
+            content = await page.content()
+            soup = BeautifulSoup(content, 'html.parser')
+
+            # Procurar por dados JSON na página
+            scripts = soup.find_all('script')
+            for script in scripts:
+                if script.string and 'UserId' in script.string:
+                    # Extrair JSON da resposta
+                    match = re.search(r'(\{.*\})', script.string)
+                    if match:
+                        data = json.loads(match.group(1))
+                        user_id = data.get('UserId')
+                        k2 = data.get('k2')
+                        if user_id and k2:
+                            logger.info(f"✅ UserData obtido: UserId={user_id} k2={k2[:30]}...")
+                            return {'UserId': user_id, 'k2': k2}
+
+            # Fallback: tentar extrair do conteúdo da página
+            text_content = await page.text_content()
+            user_id_match = re.search(r'UserId["\s:]+(\d+)', text_content)
+            k2_match = re.search(r'k2["\s:]+([a-zA-Z0-9]+)', text_content)
+
+            if user_id_match and k2_match:
+                user_id = user_id_match.group(1)
+                k2 = k2_match.group(1)
+                logger.info(f"✅ UserData extraído: UserId={user_id} k2={k2[:30]}...")
+                return {'UserId': user_id, 'k2': k2}
+
+            logger.warning("⚠️ Não foi possível extrair UserID/k2 da resposta")
+            return None
+
+        except Exception as e:
+            logger.error(f"❌ Erro ao obter user data: {e}")
+            return None
+
+    async def _access_login_page(self, page: Page, user_id: str, k2_token: str) -> bool:
+        """Acessa página de login com parâmetros"""
+        try:
+            logger.info(f"🔗 Acessando página de login com UserId: {user_id}")
+
+            login_url = f"{self.LOGIN_URL}?mode=1&UserId={user_id}&k2={k2_token}"
+            await page.goto(login_url, wait_until='networkidle')
+
+            # Verificar se página carregou corretamente
+            title = await page.title()
+            if 'login' in title.lower() or 'xat' in title.lower():
+                logger.info("✅ Página de login carregada com sucesso")
+                return True
+            else:
+                logger.warning(f"⚠️ Página suspeita carregada: {title}")
+                return False
+
+        except Exception as e:
+            logger.error(f"❌ Erro ao acessar página de login: {e}")
+            return False
+
+    async def _wait_for_captcha_resolution(self, page: Page):
+        """Aguarda resolução automática do captcha pelo navegador"""
+        try:
+            logger.info("🔒 Aguardando resolução automática do captcha...")
+
+            captcha_timeout = self.config['browser_automation'].get('captcha_timeout', 120)
+
+            # Aguardar até que não haja mais elementos de captcha visíveis
+            await page.wait_for_function(
+                """
+                () => {
+                    // Verificar se não há turnstile ou recaptcha visível
+                    const turnstile = document.querySelector('[data-sitekey]');
+                    const recaptcha = document.querySelector('.g-recaptcha, #captcha');
+                    return !turnstile && !recaptcha;
+                }
+                """,
+                timeout=captcha_timeout * 1000
+            )
+
+            logger.info("✅ Captcha resolvido automaticamente pelo navegador")
+
+        except Exception as e:
+            logger.warning(f"⚠️ Timeout aguardando resolução do captcha: {e}")
+
+    async def _fill_registration_form(self, page: Page, username: str, password: str, email: str) -> bool:
+        """Preenche e submete o formulário de registro"""
+        try:
+            logger.info("📝 Preenchendo formulário de registro...")
+
+            # Aguardar formulário estar disponível
+            await page.wait_for_selector('form', timeout=10000)
+
+            # Preencher campos
+            await page.fill('input[name="Username"]', username)
+            await page.fill('input[name="password"]', password)
+            await page.fill('input[name="password2"]', password)
+            await page.fill('input[name="email"]', email)
+
+            # Marcar checkbox de termos se existir
+            try:
+                await page.check('input[name="agree"]')
+            except:
+                pass  # Checkbox pode não existir
+
+            # Aguardar um pouco antes de submeter
+            await page.wait_for_timeout(2000)
+
+            # Submeter formulário
+            await page.click('input[type="submit"], button[type="submit"], .submit-btn')
+
+            # Aguardar resposta
+            await page.wait_for_load_state('networkidle')
+
+            logger.info("✅ Formulário submetido")
+            return True
+
+        except Exception as e:
+            logger.error(f"❌ Erro ao preencher formulário: {e}")
+            return False
+
+    async def _verify_registration_result(self, page: Page, username: str) -> bool:
+        """Verifica se a conta foi criada com sucesso"""
+        try:
+            content = await page.content()
+            text_content = await page.text_content()
+
+            # Verificar indicadores de sucesso
+            success_indicators = [
+                'conta criada',
+                'account created',
+                'success',
+                'sucesso',
+                'welcome',
+                'bem-vindo',
+                f'{username}'
+            ]
+
+            # Verificar indicadores de erro
+            error_indicators = [
+                'error',
+                'erro',
+                'failed',
+                'falhou',
+                'invalid',
+                'inválido',
+                'already exists',
+                'já existe',
+                'captcha',
+                'verification'
+            ]
+
+            success_found = any(indicator.lower() in text_content.lower() for indicator in success_indicators)
+            error_found = any(indicator.lower() in text_content.lower() for indicator in error_indicators)
+
+            if success_found and not error_found:
+                logger.info(f"✅ Conta criada com sucesso: {username}")
+                return True
+            elif error_found:
+                logger.warning(f"⚠️ Erro detectado na criação da conta: {username}")
+                return False
+            else:
+                logger.info(f"ℹ️ Status da criação indefinido para: {username}")
+                return False
+
+        except Exception as e:
+            logger.error(f"❌ Erro ao verificar resultado: {e}")
+            return False
+
+    async def _random_delay(self):
+        """Aguarda delay aleatório entre ações"""
+        min_delay = self.config['delays'].get('min_entre_requisicoes', 5)
+        max_delay = self.config['delays'].get('max_entre_requisicoes', 15)
+        delay = random.uniform(min_delay, max_delay)
+        logger.info(f"⏳ Aguardando {delay:.1f}s...")
+        await asyncio.sleep(delay)
+
+
 def main():
     """Função principal"""
     try:
         # Criar diretório de dados se não existir
         DATA_DIR.mkdir(exist_ok=True)
-        
-        # Inicializar gerador
-        gerador = XATAccountGenerator()
-        
-        # Executar
-        gerador.executar()
-    
+
+        # Carregar configuração
+        config_file = CONFIG_DIR / 'config.json'
+        config = json.loads(json.dumps(DEFAULT_CONFIG))
+
+        if config_file.exists():
+            with open(config_file, 'r', encoding='utf-8') as f:
+                user_config = json.load(f)
+            def merge(base, extra):
+                for chave, valor in extra.items():
+                    if isinstance(valor, dict) and chave in base and isinstance(base[chave], dict):
+                        merge(base[chave], valor)
+                    else:
+                        base[chave] = valor
+            merge(config, user_config)
+
+        # Verificar se deve usar browser automation
+        if config.get('browser_automation', {}).get('enabled', True) and PLAYWRIGHT_AVAILABLE:
+            logger.info("🎭 Usando Browser Automation (Playwright)")
+            asyncio.run(run_browser_automation(config))
+        else:
+            logger.info("🔗 Usando método tradicional (Requests)")
+            gerador = XATAccountGenerator()
+            gerador.executar()
+
     except KeyboardInterrupt:
         logger.warning("\n⚠️ Aplicação encerrada pelo usuário")
         sys.exit(0)
-    
+
     except Exception as e:
         logger.error(f"❌ Erro fatal: {e}")
         sys.exit(1)
+
+
+async def run_browser_automation(config: Dict):
+    """Executa automação usando Playwright"""
+    try:
+        # Carregar proxies
+        proxies = []
+        proxy_file = DATA_DIR / 'proxies.txt'
+        if proxy_file.exists():
+            with open(proxy_file, 'r', encoding='utf-8') as f:
+                proxies = [line.strip() for line in f.readlines() if line.strip() and not line.strip().startswith('#')]
+
+        # Carregar emails
+        emails = []
+        email_file = DATA_DIR / 'emails.txt'
+        if email_file.exists():
+            with open(email_file, 'r', encoding='utf-8') as f:
+                emails = [line.strip() for line in f.readlines() if line.strip()]
+
+        # Carregar usernames
+        usernames = []
+        username_file = DATA_DIR / 'usernames.txt'
+        if username_file.exists():
+            with open(username_file, 'r', encoding='utf-8') as f:
+                usernames = [line.strip() for line in f.readlines() if line.strip()]
+
+        if not emails:
+            logger.error("❌ Nenhum email encontrado em emails.txt")
+            return
+
+        if not usernames:
+            logger.error("❌ Nenhum username encontrado em usernames.txt")
+            return
+
+        logger.info(f"📧 Processando {len(emails)} emails com {len(usernames)} usernames disponíveis")
+
+        # Inicializar automação
+        async with XATBrowserAutomation(config, proxies) as automation:
+            contas_criadas = 0
+
+            for i, email in enumerate(emails, 1):
+                logger.info(f"📧 Processando: {i}/{len(emails)} - {email}")
+
+                # Selecionar username aleatório
+                if not usernames:
+                    logger.warning("⚠️ usernames esgotados")
+                    break
+
+                username = random.choice(usernames)
+                usernames.remove(username)  # Remover para não reutilizar
+
+                # Gerar senha
+                senha = ''.join(random.choices(string.ascii_letters + string.digits, k=config.get('senha', {}).get('tamanho_min', 8)))
+
+                # Criar conta
+                sucesso = await automation.create_account(username, senha, email)
+
+                if sucesso:
+                    contas_criadas += 1
+                    logger.info(f"✅ Conta criada: {username} | {email}")
+
+                    # Salvar em success_criacao.txt
+                    success_file = DATA_DIR / 'success_criacao.txt'
+                    with open(success_file, 'a', encoding='utf-8') as f:
+                        f.write(f"{username}:{senha}:{email}\n")
+                else:
+                    logger.warning(f"❌ Falha ao criar conta para {email}")
+
+                # Aguardar entre contas
+                if i < len(emails):
+                    delay = random.uniform(
+                        config['delays'].get('min_entre_contas', 30),
+                        config['delays'].get('max_entre_contas', 60)
+                    )
+                    logger.info(f"⏳ Aguardando {delay:.1f}s antes da próxima conta...")
+                    await asyncio.sleep(delay)
+
+            logger.info(f"🎉 Processo concluído! {contas_criadas}/{len(emails)} contas criadas com sucesso")
+
+    except Exception as e:
+        logger.error(f"❌ Erro na automação: {e}")
 
 
 if __name__ == "__main__":

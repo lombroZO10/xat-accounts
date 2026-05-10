@@ -22,12 +22,12 @@
     "tamanho_min": 8,
     "tamanho_max": 16
   },
-  "proxy": {
-    "rotacao": "tor_only",
-    "health_check": false,
-    "use_public_fallback": false,
-    "force_proxy": true,
-    "skip_for_endpoints": []
+  "browser_automation": {
+    "enabled": true,
+    "headless": true,
+    "proxy_rotation": true,
+    "captcha_timeout": 120,
+    "page_timeout": 30000
   },
   "captcha_solver": {
     "enabled": true,
