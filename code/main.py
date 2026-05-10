@@ -1826,7 +1826,7 @@ class XATBrowserAutomation:
             await self._simulate_human_interaction(page)
 
             captcha_timeout = self.config['browser_automation'].get('captcha_timeout', 40)
-            wait_timeout = min(captcha_timeout * 1000, 40000)
+            wait_timeout = min(captcha_timeout * 1000, 60000)  # Aumentado para 60s máximo
 
             sitekey = await self._extract_sitekey_from_full_page_content(page)
             if sitekey:
@@ -2340,13 +2340,8 @@ class XATBrowserAutomation:
     def _normalize_captcha_pageurl(self, page_url: str) -> str:
         """Normaliza pageurl para enviar ao solver, removendo parâmetros sensíveis."""
         try:
-            parsed = urlparse(page_url)
-            query = parse_qs(parsed.query)
-            keep = {}
-            if 'mode' in query:
-                keep['mode'] = query['mode']
-            normalized_query = urlencode(keep, doseq=True)
-            return parsed._replace(query=normalized_query).geturl()
+            # Sempre retornar a URL estrita para o 2Captcha
+            return "https://xat.com/login?mode=1"
         except Exception:
             return page_url
 
