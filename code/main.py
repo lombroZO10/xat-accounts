@@ -2320,8 +2320,8 @@ class XATBrowserAutomation:
 
             # Garantir que token de captcha está injetado
             await self._inject_captcha_token_if_missing(page)
-            logger.info("⏳ Aguardando 5s para o Cloudflare processar o token injetado antes de enviar o registro...")
-            await page.wait_for_timeout(5000)
+            logger.info("⏳ Aguardando 1s para o Cloudflare processar o token injetado antes de enviar o registro...")
+            await page.wait_for_timeout(1000)
 
             await page.evaluate(
                 """
@@ -2837,49 +2837,12 @@ class XATBrowserAutomation:
                     invokeCallback(callbackName);
                 });
 
-                // Tenta clicar no widget se existir
-                const widget = document.querySelector('.cf-turnstile');
-                if (widget && typeof widget.click === 'function') {
-                    try {
-                        widget.click();
-                    } catch (e) {}
-                }
-
-                // Executa métodos do turnstile se disponível
-                if (window.turnstile && typeof window.turnstile === 'object') {
-                    try {
-                        if (typeof window.turnstile.ready === 'function') {
-                            window.turnstile.ready();
-                        }
-                    } catch (e) {}
-                    try {
-                        if (typeof window.turnstile.render === 'function') {
-                            window.turnstile.render();
-                        }
-                    } catch (e) {}
-                }
-
                 // Callback de config do Turnstile
                 if (window.__cf_turnstile_config && window.__cf_turnstile_config.sitekey) {
                     invokeCallback(window.__cf_turnstile_config.callback || window.__cf_turnstile_config['data-callback']);
                 }
 
-                // Última tentativa: executar turnstile.execute()
-                const executeTurnstile = () => {
-                    if (window.turnstile) {
-                        try {
-                            if (typeof window.turnstile.execute === 'function') {
-                                window.turnstile.execute();
-                            }
-                        } catch (e) {}
-                        try {
-                            if (typeof window.turnstile === 'function') {
-                                window.turnstile(token);
-                            }
-                        } catch (e) {}
-                    }
-                };
-                executeTurnstile();
+                // Não clicar no widget após injetar o token; a injeção + callback é o passo final antes do registro.
             }
             """,
             token
