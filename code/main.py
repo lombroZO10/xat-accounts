@@ -1483,9 +1483,21 @@ class XATBrowserAutomation:
         """Inicializa o navegador Playwright com stealth"""
         try:
             self.playwright = await async_playwright().start()
-            self._choose_next_proxy(exclude_current=False)
-            await self._create_browser_context()
-            logger.info("✅ Navegador Playwright inicializado com stealth")
+            attempt = 0
+            max_attempts = len(self.proxies) if self.proxies else 3
+
+            while attempt < max_attempts:
+                self._choose_next_proxy(exclude_current=(attempt > 0))
+                try:
+                    await self._create_browser_context()
+                    logger.info("✅ Navegador Playwright inicializado com stealth")
+                    return
+                except Exception as e:
+                    logger.error(f"❌ Erro ao inicializar contexto com proxy {self.current_proxy}: {e}")
+                    attempt += 1
+                    if attempt >= max_attempts:
+                        raise
+                    logger.info("🔄 Tentando próximo proxy para inicializar o navegador")
 
         except Exception as e:
             logger.error(f"❌ Erro ao inicializar navegador: {e}")
@@ -1672,43 +1684,49 @@ class XATBrowserAutomation:
             args=browser_args
         )
 
-        user_agent = random.choice(self.user_agents)
-        self.context = await self.browser.new_context(
-            viewport={'width': 1920, 'height': 1080},
-            device_scale_factor=1,
-            has_touch=False,
-            user_agent=user_agent,
-            locale='pt-BR',
-            timezone_id='America/Sao_Paulo',
-            extra_http_headers=self._build_extra_http_headers(user_agent),
-            proxy=proxy_config
-        )
+        try:
+            user_agent = random.choice(self.user_agents)
+            self.context = await self.browser.new_context(
+                viewport={'width': 1920, 'height': 1080},
+                device_scale_factor=1,
+                has_touch=False,
+                user_agent=user_agent,
+                locale='pt-BR',
+                timezone_id='America/Sao_Paulo',
+                extra_http_headers=self._build_extra_http_headers(user_agent),
+                proxy=proxy_config
+            )
 
-        stealth_config = Stealth(
-            webgl_vendor_override='Intel Inc.',
-            webgl_renderer_override='Intel(R) Iris(TM) Graphics 6100',
-            navigator_vendor_override='Google Inc.',
-            navigator_platform_override='Win32',
-            navigator_languages_override=('pt-BR', 'pt', 'en-US', 'en'),
-            navigator_user_agent_override=random.choice(self.user_agents),
-            chrome_app=True,
-            chrome_csi=True,
-            chrome_load_times=True,
-            chrome_runtime=False,
-            hairline=True,
-            iframe_content_window=True,
-            media_codecs=True,
-            navigator_hardware_concurrency=True,
-            navigator_languages=True,
-            navigator_permissions=True,
-            navigator_platform=True,
-            navigator_plugins=True,
-            navigator_webdriver=True,
-            error_prototype=True,
-            sec_ch_ua=True,
-            webgl_vendor=True
-        )
-        await stealth_config.apply_stealth_async(self.context)
+            stealth_config = Stealth(
+                webgl_vendor_override='Intel Inc.',
+                webgl_renderer_override='Intel(R) Iris(TM) Graphics 6100',
+                navigator_vendor_override='Google Inc.',
+                navigator_platform_override='Win32',
+                navigator_languages_override=('pt-BR', 'pt', 'en-US', 'en'),
+                navigator_user_agent_override=random.choice(self.user_agents),
+                chrome_app=True,
+                chrome_csi=True,
+                chrome_load_times=True,
+                chrome_runtime=False,
+                hairline=True,
+                iframe_content_window=True,
+                media_codecs=True,
+                navigator_hardware_concurrency=True,
+                navigator_languages=True,
+                navigator_permissions=True,
+                navigator_platform=True,
+                navigator_plugins=True,
+                navigator_webdriver=True,
+                error_prototype=True,
+                sec_ch_ua=True,
+                webgl_vendor=True
+            )
+            await stealth_config.apply_stealth_async(self.context)
+
+        except Exception as e:
+            logger.error(f"❌ Falha ao criar contexto Playwright com proxy {self.current_proxy}: {e}")
+            await self.cleanup()
+            raise
 
     async def _clear_browser_context_identity(self) -> None:
         """Limpa cookies e permissões do contexto antes de iniciar um novo username."""
