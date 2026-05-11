@@ -1440,8 +1440,7 @@ class XATBrowserAutomation:
 
         self.browser = await self.playwright.chromium.launch(
             headless=self.config['browser_automation'].get('headless', True),
-            args=browser_args,
-            proxy=proxy_config
+            args=browser_args
         )
 
         user_agent = random.choice(self.user_agents)
@@ -1452,7 +1451,8 @@ class XATBrowserAutomation:
             user_agent=user_agent,
             locale='pt-BR',
             timezone_id='America/Sao_Paulo',
-            extra_http_headers=self._build_extra_http_headers(user_agent)
+            extra_http_headers=self._build_extra_http_headers(user_agent),
+            proxy=proxy_config
         )
 
         stealth_config = Stealth()
