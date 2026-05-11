@@ -95,13 +95,15 @@ class XATAccountGenerator:
     AUSER_URL = f"{BASE_URL}/web_gear/chat/auser3.php"
     LOGIN_URL = f"{BASE_URL}/login"
     
-    # User-Agents variados
+    # User-Agents variados (Windows 10/11 com Chrome/Edge realista)
     USER_AGENTS = [
         "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-        "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:122.0) Gecko/20100101 Firefox/122.0",
-        "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-        "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36",
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/119.0.0.0 Safari/537.36",
         "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Edge/120.0.0.0",
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Edge/121.0.0.0",
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:122.0) Gecko/20100101 Firefox/122.0",
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/118.0.0.0 Safari/537.36",
     ]
     
     def __init__(self):
@@ -1467,7 +1469,7 @@ class XATBrowserAutomation:
         try:
             BAD_PROXIES_FILE.parent.mkdir(parents=True, exist_ok=True)
             with open(BAD_PROXIES_FILE, 'a', encoding='utf-8') as f:
-                f.write(f"{self.current_proxy}  # {reason}  [{datetime.utcnow().isoformat()}]\n")
+                f.write(f"{self.current_proxy}  # {reason}  [{datetime.datetime.now().isoformat()}]\n")
             logger.warning(f"🚫 Proxy blacklistado: {self.current_proxy} ({reason})")
         except Exception as e:
             logger.warning(f"⚠️ Não foi possível gravar bad_proxies.log: {e}")
@@ -1477,7 +1479,7 @@ class XATBrowserAutomation:
         try:
             SHADOWBAN_LOG_FILE.parent.mkdir(parents=True, exist_ok=True)
             with open(SHADOWBAN_LOG_FILE, 'a', encoding='utf-8') as f:
-                f.write(f"{datetime.utcnow().isoformat()} | {username} | {email} | {reason}\n")
+                f.write(f"{datetime.datetime.now().isoformat()} | {username} | {email} | {reason}\n")
             logger.warning(f"⚠️ Possível shadowban detectado para {username}: {reason}")
         except Exception as e:
             logger.warning(f"⚠️ Não foi possível gravar shadowban.log: {e}")
@@ -1697,6 +1699,10 @@ class XATBrowserAutomation:
             await self._patch_turnstile_callbacks(page)
             response = await page.goto(login_url, wait_until='networkidle')
 
+            # Aguardar a página intersticial do Cloudflare sumir ("Checking your browser")
+            logger.info("⏳ Aguardando 5s para página intersticial Cloudflare carregar/sumir...")
+            await page.wait_for_timeout(5000)
+
             if response and response.status in [403, 503]:
                 reason = f"Status de bloqueio na página de login: {response.status}"
                 logger.warning(f"⚠️ {reason}")
@@ -1705,6 +1711,20 @@ class XATBrowserAutomation:
                 return False
 
             title = await page.title()
+            
+            # Detecção de página intersticial Cloudflare: "Just a moment..."
+            if not title or 'just a moment' in title.lower() or 'checking your browser' in title.lower() or 'cloudflare' in title.lower():
+                logger.warning(f"⚠️ Página intersticial Cloudflare detectada (título: '{title}'). Aguardando até 15s...")
+                try:
+                    await page.wait_for_load_state('networkidle', timeout=15000)
+                    await page.wait_for_timeout(3000)  # Extra 3s para garantir que carregou
+                    title = await page.title()
+                    logger.info(f"✅ Página carregou após intersticial: {title}")
+                except Exception as e:
+                    logger.warning(f"⚠️ Timeout aguardando página após Cloudflare: {e}")
+                    self._blacklist_current_proxy("Página intersticial Cloudflare não carregou em tempo")
+                    return False
+            
             if 'login' in title.lower() or 'xat' in title.lower():
                 logger.info("✅ Página de login carregada com sucesso")
             else:
