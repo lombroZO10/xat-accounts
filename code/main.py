@@ -424,22 +424,20 @@ class XATAccountGenerator:
         return self.current_proxy
     
     def _build_proxy_dict(self, proxy_str: str) -> Optional[Dict[str, str]]:
-        """Constrói um dicionário de proxy compatível com requests"""
+        """Constrói um dicionário de proxy compatível com requests."""
         if not proxy_str:
             return None
 
-        proxy_url = proxy_str
+        proxy_str = proxy_str.strip().rstrip('/')
         if proxy_str.lower().startswith(('http://', 'https://', 'socks5://', 'socks4://')):
             proxy_url = proxy_str
-        elif '@' in proxy_str:
-            partes = proxy_str.split(':')
-            if len(partes) == 4:
-                ip, porta, user, password = partes
-                proxy_url = f"http://{user}:{password}@{ip}:{porta}"
-            else:
-                proxy_url = f"http://{proxy_str}"
-        else:
+        elif '@' in proxy_str and proxy_str.count(':') == 3:
+            ip, porta, user, password = proxy_str.split(':', 3)
+            proxy_url = f"http://{user}:{password}@{ip}:{porta}"
+        elif ':' in proxy_str:
             proxy_url = f"http://{proxy_str}"
+        else:
+            return None
 
         return {
             'http': proxy_url,
@@ -1369,28 +1367,22 @@ class XATBrowserAutomation:
             logger.warning(f"⚠️ Erro ao limpar recursos: {e}")
 
     def _choose_next_proxy(self, exclude_current: bool = True) -> Optional[str]:
-        """Escolhe o próximo proxy da lista, usando Tor como fallback se não houver proxies disponíveis."""
+        """Escolhe o próximo proxy da lista."""
         if not self.proxies:
-            # Fallback para Tor se não houver proxies disponíveis
-            logger.warning("⚠️ Nenhum proxy disponível na lista. Tentando usar Tor como fallback...")
-            tor_proxy = "socks5://127.0.0.1:9050"
-            self.current_proxy = tor_proxy
-            logger.info(f"🌐 Usando Tor como proxy fallback: {tor_proxy}")
-            logger.warning("⚠️ Proxy Tor em uso: este IP é mais frágil para o fluxo de registro e deve ser trocado assim que possível.")
-            return tor_proxy
+            logger.error("❌ Nenhum proxy disponível na lista. Não há fallback para Tor quando proxies SOCKS5 autenticados são usados.")
+            return None
 
         options = [p for p in self.proxies if p != self.current_proxy] if exclude_current else list(self.proxies)
         if not options:
             options = list(self.proxies)
 
         self.current_proxy = random.choice(options)
-        # Extrair apenas IP:port para log (sem credenciais)
         proxy_display = self.current_proxy.replace('http://', '').replace('https://', '')
         if '@' in proxy_display:
             proxy_display = proxy_display.split('@', 1)[1]
         logger.info(f"🌐 Proxy selecionado: {proxy_display}")
-        if self.current_proxy.startswith('socks5://') or '198.23.239' in self.current_proxy:
-            logger.warning("⚠️ Proxy Tor detectado: use com cautela e rotacione se a página não carregar rápido.")
+        if self.current_proxy.startswith('socks5://'):
+            logger.info("✅ Proxy SOCKS5 selecionado")
         return self.current_proxy
 
     def _set_current_proxy(self, proxy: Optional[str]) -> None:
@@ -1402,51 +1394,27 @@ class XATBrowserAutomation:
         return self.current_proxy
 
     def _build_proxy_settings(self, proxy: Optional[str]) -> Optional[Dict[str, str]]:
-        """Constrói as configurações de proxy para o Playwright, incluindo suporte a SOCKS5 (Tor)."""
+        """Constrói as configurações de proxy para o Playwright.
+
+        Suporta URLs completas como socks5://user:pass@ip:port e http://user:pass@ip:port.
+        O campo 'server' contém a URL completa de host:port, e credenciais são passadas separadamente.
+        """
         if not proxy:
             return None
 
-        # Suporte especial para Tor (SOCKS5)
-        if proxy.startswith('socks5://'):
-            proxy_clean = proxy.replace('socks5://', '')
-            if '@' in proxy_clean:
-                credentials, server = proxy_clean.rsplit('@', 1)
-                username, password = credentials.split(':', 1)
-                if ':' in server:
-                    ip, port = server.rsplit(':', 1)
-                    return {
-                        'server': f'socks5://{ip}:{port}',
-                        'username': username,
-                        'password': password
-                    }
-            elif ':' in proxy_clean:
-                ip, port = proxy_clean.rsplit(':', 1)
-                return {
-                    'server': f'socks5://{ip}:{port}'
-                }
+        proxy = proxy.strip().rstrip('/')
+        parsed = urlparse(proxy if '://' in proxy else f'http://{proxy}')
+        if not parsed.hostname or not parsed.port:
+            return None
 
-        # Remove 'http://' se presente
-        proxy_clean = proxy.replace('http://', '').replace('https://', '')
-        
-        # Formato: username:password@ip:port ou ip:port
-        if '@' in proxy_clean:
-            credentials, server = proxy_clean.rsplit('@', 1)
-            username, password = credentials.split(':', 1)
-            if ':' in server:
-                ip, port = server.rsplit(':', 1)
-                return {
-                    'server': f'http://{ip}:{port}',
-                    'username': username,
-                    'password': password
-                }
-        elif ':' in proxy_clean:
-            # Sem credenciais - assume ip:port
-            ip, port = proxy_clean.rsplit(':', 1)
-            return {
-                'server': f'http://{ip}:{port}'
-            }
-        
-        return None
+        proxy_config: Dict[str, str] = {
+            'server': f'{parsed.scheme}://{parsed.hostname}:{parsed.port}'
+        }
+        if parsed.username and parsed.password:
+            proxy_config['username'] = parsed.username
+            proxy_config['password'] = parsed.password
+
+        return proxy_config
 
     async def _create_browser_context(self) -> None:
         """Cria ou recria o navegador/contexto Playwright com o proxy atual."""
@@ -1511,15 +1479,6 @@ class XATBrowserAutomation:
         if not self.proxies:
             logger.error("❌ Nenhum proxy disponível para rotacionar")
             return False
-
-        # Reset Tor service before rotating proxy (Linux only)
-        try:
-            logger.info("🔄 Resetando serviço Tor...")
-            os.system('sudo systemctl restart tor')
-            time.sleep(15)  # Wait 15 seconds for Tor circuit to be ready
-            logger.info("✅ Tor resetado com sucesso")
-        except Exception as e:
-            logger.debug(f"⚠️ Não foi possível resetar Tor (pode não estar instalado): {e}")
 
         self._choose_next_proxy()
         try:
