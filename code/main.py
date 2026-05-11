@@ -914,7 +914,11 @@ class XATAccountGenerator:
                             texto_resposta = self._decodificar_resposta(resposta)
                             if not self._detectar_recaptcha(texto_resposta):
                                 logger.info("✅ reCAPTCHA/Turnstile resolvido via solver")
-                                return self._avaliar_resposta_criacao(resposta, username)
+                                sucesso = self._avaliar_resposta_criacao(resposta, username)
+                                # ⚠️ FEATURE 1: Se falhou mas não é recaptcha, pode ser shadowban - blacklist IP
+                                if not sucesso and not self._detectar_recaptcha(texto_resposta):
+                                    self._detectar_e_processar_shadowban(username, email, texto_resposta)
+                                return sucesso
                             logger.warning("⚠️ reCAPTCHA ainda presente após solver")
                         else:
                             logger.warning("⚠️ Falha ao reenviar formulário após solver de reCAPTCHA")
@@ -927,7 +931,11 @@ class XATAccountGenerator:
                 logger.debug(f"Resposta de cadastro com recaptcha: {texto_resposta[:500]}")
                 return False
 
-            return self._avaliar_resposta_criacao(resposta, username)
+            sucesso = self._avaliar_resposta_criacao(resposta, username)
+            # ⚠️ FEATURE 1: Se falhou, detectar se é shadowban e blacklist IP
+            if not sucesso:
+                self._detectar_e_processar_shadowban(username, email, texto_resposta)
+            return sucesso
 
         except Exception as e:
             logger.error(f"❌ Erro ao criar conta: {e}")
@@ -1382,6 +1390,14 @@ class XATBrowserAutomation:
         logger.info(f"🌐 Proxy selecionado: {proxy_display}")
         return self.current_proxy
 
+    def _set_current_proxy(self, proxy: Optional[str]) -> None:
+        """Define o proxy atual."""
+        self.current_proxy = proxy
+
+    def _get_current_proxy(self) -> Optional[str]:
+        """Retorna o proxy atual."""
+        return self.current_proxy
+
     def _build_proxy_settings(self, proxy: Optional[str]) -> Optional[Dict[str, str]]:
         """Constrói as configurações de proxy para o Playwright, incluindo suporte a SOCKS5 (Tor)."""
         if not proxy:
@@ -1540,6 +1556,42 @@ class XATBrowserAutomation:
             logger.warning(f"⚠️ Possível shadowban detectado para {username}: {reason}")
         except Exception as e:
             logger.warning(f"⚠️ Não foi possível gravar shadowban.log: {e}")
+
+    def _detectar_e_processar_shadowban(self, username: str, email: str, texto_resposta: str) -> None:
+        """
+        FEATURE 1: Rotação Obrigatória de Proxy (Shadow Ban)
+        Detecta indicadores de shadowban na resposta e força rotação de proxy (IP) para próxima tentativa.
+        Nunca usa o mesmo IP após uma falha de registro.
+        """
+        # Indicadores de shadowban/ID shadow ban
+        shadowban_keywords = [
+            'shadow ban', 'shadowban', 'id already', 'id in use',
+            'banned', 'bloqueado', 'banido', 'banned temporarily',
+            'account banned', 'id banned', 'user banned',
+            'temporarily banned', 'suspension', 'suspenso',
+            'access revoked', 'access denied', 'acesso negado',
+            'user not allowed', 'user cannot', 'não permitido'
+        ]
+        
+        texto_lower = texto_resposta.lower()
+        detected_reasons = [kw for kw in shadowban_keywords if kw in texto_lower]
+        
+        if detected_reasons:
+            logger.warning(f"🚫 SHADOW BAN DETECTADO para {username}: {', '.join(detected_reasons)}")
+            self._log_shadowban(username, email, f"Indicadores: {', '.join(detected_reasons)}")
+            
+            # ⚠️ Blacklist o IP/proxy atual obrigatoriamente
+            if self.current_proxy:
+                self._blacklist_current_proxy(f"Shadow Ban detectado para {username} - indicadores: {', '.join(detected_reasons)}")
+                logger.info(f"🔄 Rotação de proxy OBRIGATÓRIA: IP será trocado antes do próximo username")
+            else:
+                logger.warning(f"⚠️ Nenhum proxy atual para blacklistar (possível erro de estado)")
+            
+            # Resetar proxy para forçar rotação na próxima conta
+            self._set_current_proxy(None)
+        else:
+            # Outros motivos de falha - registrar para análise
+            logger.debug(f"❌ Falha ao criar conta {username}, mas não foi detectado shadowban específico")
 
     async def create_account(self, username: str, password: str, email: str) -> bool:
         """Cria conta XAT usando automação de navegador"""
@@ -2700,7 +2752,11 @@ class XATBrowserAutomation:
         }
 
     async def _inject_captcha_token(self, page: Page, token: str) -> None:
-        """Injeta o token do solver nos campos escondidos do formulário e dispara callbacks."""
+        """
+        FEATURE 2: Sincronização do Captcha (Bot)
+        Injeta o token do solver nos campos escondidos e invoca callbacks JavaScript.
+        Garante que window.cf_callback é notificado ANTES da submissão do formulário.
+        """
         await page.evaluate(
             """
             (token) => {
@@ -2742,23 +2798,38 @@ class XATBrowserAutomation:
                     }
                 };
 
+                // ⚠️ Armazena token em múltiplas variáveis para compatibilidade máxima
                 window.cf_token = token;
                 window.turnstileToken = token;
                 window.grecaptchaResponse = token;
                 window.recaptchaResponse = token;
                 window.xatCaptchaToken = token;
 
+                // ⚠️ FEATURE 2: Notifica o xat via window.cf_callback() ANTES de qualquer outro evento
+                // Isto garante que o JavaScript do xat sabe que o token está pronto
+                if (typeof window.cf_callback === 'function') {
+                    try {
+                        window.cf_callback(token);
+                        console.log('[Playwright] cf_callback invocado com sucesso');
+                    } catch (e) {
+                        console.log('[Playwright] cf_callback falhou:', e);
+                    }
+                }
+
+                // Dispatcher de token do Playwright
                 if (typeof window.__playwright_dispatch_turnstile_token === 'function') {
                     try {
                         window.__playwright_dispatch_turnstile_token(token);
                     } catch (e) {}
                 }
 
+                // Invoca callbacks de elementos que têm data-callback
                 document.querySelectorAll('[data-callback], [data-recaptcha-callback], [data-sitekey]').forEach(element => {
                     const callbackName = element.getAttribute('data-callback') || element.getAttribute('data-recaptcha-callback');
                     invokeCallback(callbackName);
                 });
 
+                // Tenta clicar no widget se existir
                 const widget = document.querySelector('.cf-turnstile');
                 if (widget && typeof widget.click === 'function') {
                     try {
@@ -2766,6 +2837,7 @@ class XATBrowserAutomation:
                     } catch (e) {}
                 }
 
+                // Executa métodos do turnstile se disponível
                 if (window.turnstile && typeof window.turnstile === 'object') {
                     try {
                         if (typeof window.turnstile.ready === 'function') {
@@ -2779,10 +2851,12 @@ class XATBrowserAutomation:
                     } catch (e) {}
                 }
 
+                // Callback de config do Turnstile
                 if (window.__cf_turnstile_config && window.__cf_turnstile_config.sitekey) {
                     invokeCallback(window.__cf_turnstile_config.callback || window.__cf_turnstile_config['data-callback']);
                 }
 
+                // Última tentativa: executar turnstile.execute()
                 const executeTurnstile = () => {
                     if (window.turnstile) {
                         try {
@@ -2802,6 +2876,12 @@ class XATBrowserAutomation:
             """,
             token
         )
+        
+        # ⚠️ FEATURE 2: Aguarda um momento para garantir que o callback foi processado
+        # Isto dá tempo para o JavaScript do xat processar a notificação cf_callback
+        await page.wait_for_timeout(300)
+        logger.debug("✅ Aguardado 300ms para sincronizar callbacks do captcha")
+
 
     async def _inject_captcha_token_if_missing(self, page: Page) -> None:
         """Garante que o token de captcha está presente antes de submeter o formulário."""
@@ -2979,10 +3059,16 @@ class XATBrowserAutomation:
                 return True
             elif error_found:
                 logger.warning(f"⚠️ Erro detectado na criação da conta: {username}")
+                # ⚠️ FEATURE 1: Detectar e processar shadowban se houver indicadores
+                self._detectar_e_processar_shadowban(username, email, text_content)
                 return False
             else:
                 logger.warning(f"⚠️ Status da criação indefinido para: {username} - possivel shadowban")
                 self._log_shadowban(username, email, 'Status indefinido após submissão de registro')
+                # ⚠️ FEATURE 1: Forçar blacklist quando status é indefinido (pode ser shadowban silencioso)
+                if self.current_proxy:
+                    self._blacklist_current_proxy(f"Status indefinido para {username} - possível shadowban silencioso")
+                self._set_current_proxy(None)
                 return False
 
         except Exception as e:
