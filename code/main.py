@@ -1430,6 +1430,8 @@ class XATBrowserAutomation:
         user_agent = random.choice(self.user_agents)
         self.context = await self.browser.new_context(
             viewport={'width': 1920, 'height': 1080},
+            device_scale_factor=1,
+            has_touch=False,
             user_agent=user_agent,
             locale='pt-BR',
             timezone_id='America/Sao_Paulo',
@@ -1469,7 +1471,7 @@ class XATBrowserAutomation:
         try:
             BAD_PROXIES_FILE.parent.mkdir(parents=True, exist_ok=True)
             with open(BAD_PROXIES_FILE, 'a', encoding='utf-8') as f:
-                f.write(f"{self.current_proxy}  # {reason}  [{datetime.datetime.now().isoformat()}]\n")
+                f.write(f"{self.current_proxy}  # {reason}  [{datetime.now().isoformat()}]\n")
             logger.warning(f"🚫 Proxy blacklistado: {self.current_proxy} ({reason})")
         except Exception as e:
             logger.warning(f"⚠️ Não foi possível gravar bad_proxies.log: {e}")
@@ -1479,7 +1481,7 @@ class XATBrowserAutomation:
         try:
             SHADOWBAN_LOG_FILE.parent.mkdir(parents=True, exist_ok=True)
             with open(SHADOWBAN_LOG_FILE, 'a', encoding='utf-8') as f:
-                f.write(f"{datetime.datetime.now().isoformat()} | {username} | {email} | {reason}\n")
+                f.write(f"{datetime.now().isoformat()} | {username} | {email} | {reason}\n")
             logger.warning(f"⚠️ Possível shadowban detectado para {username}: {reason}")
         except Exception as e:
             logger.warning(f"⚠️ Não foi possível gravar shadowban.log: {e}")
@@ -1720,15 +1722,25 @@ class XATBrowserAutomation:
                     await page.wait_for_timeout(3000)  # Extra 3s para garantir que carregou
                     title = await page.title()
                     logger.info(f"✅ Página carregou após intersticial: {title}")
+                    
+                    # Validação: se título continua vazio/suspeito, o proxy/bloqueio persistiu
+                    if not title or title.strip() == '':
+                        raise Exception("Título de página permanece vazio após Cloudflare - bloqueio contínuo detectado")
                 except Exception as e:
                     logger.warning(f"⚠️ Timeout aguardando página após Cloudflare: {e}")
-                    self._blacklist_current_proxy("Página intersticial Cloudflare não carregou em tempo")
+                    self._blacklist_current_proxy(f"Página intersticial Cloudflare não carregou ou título vazio: {e}")
                     return False
             
             if 'login' in title.lower() or 'xat' in title.lower():
                 logger.info("✅ Página de login carregada com sucesso")
             else:
-                logger.warning(f"⚠️ Página suspeita carregada: {title}")
+                # Se título vazio/suspeito mesmo após aguardar Cloudflare, é bloqueio persistente
+                if not title or title.strip() == '':
+                    logger.warning(f"⚠️ Página carregou com título vazio - provável bloqueio Cloudflare persistente")
+                    self._blacklist_current_proxy("Página login com título vazio após Cloudflare bypass")
+                    raise Exception("Página de login carregou com título vazio - proxy bloqueado")
+                else:
+                    logger.warning(f"⚠️ Página suspeita carregada: {title}. Tentando continuar...")
 
             # Dar um breve tempo para o DOM ser atualizado pelo JavaScript
             await page.wait_for_timeout(1000)
