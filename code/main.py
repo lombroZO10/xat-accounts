@@ -1577,8 +1577,13 @@ class XATBrowserAutomation:
             return None
 
         proxy = proxy.strip().rstrip('/')
-        parsed = urlparse(proxy if '://' in proxy else f'http://{proxy}')
-        if not parsed.hostname or not parsed.port:
+        try:
+            parsed = urlparse(proxy if '://' in proxy else f'http://{proxy}')
+            if not parsed.hostname or not parsed.port:
+                logger.warning(f"⚠️ Proxy {proxy} não tem hostname ou porta válida")
+                return None
+        except Exception as e:
+            logger.warning(f"⚠️ Erro ao fazer parse do proxy {proxy}: {e}")
             return None
 
         if parsed.scheme.lower() == 'socks5' and parsed.username and parsed.password:
@@ -1679,18 +1684,22 @@ class XATBrowserAutomation:
         if not proxy_str.lower().startswith(('http://', 'https://', 'socks5://', 'socks4://')):
             proxy_str = f'http://{proxy_str}'
 
-        parsed = urlparse(proxy_str)
-        if not parsed.hostname or parsed.hostname.lower() != 'brd.superproxy.io':
+        try:
+            parsed = urlparse(proxy_str)
+            if not parsed.hostname or parsed.hostname.lower() != 'brd.superproxy.io':
+                return proxy_str
+
+            username = parsed.username or ''
+            password = parsed.password or ''
+            if username and '-session-' not in username:
+                suffix = f'-session-{random.randint(100000, 999999)}'
+                username = f'{username}{suffix}'
+
+            scheme = parsed.scheme or 'http'
+            return f"{scheme}://{username}:{password}@{parsed.hostname}:{parsed.port}"
+        except Exception as e:
+            logger.warning(f"⚠️ Erro ao aplicar sessão Bright Data no proxy {proxy_str}: {e}")
             return proxy_str
-
-        username = parsed.username or ''
-        password = parsed.password or ''
-        if username and '-session-' not in username:
-            suffix = f'-session-{random.randint(100000, 999999)}'
-            username = f'{username}{suffix}'
-
-        scheme = parsed.scheme or 'http'
-        return f"{scheme}://{username}:{password}@{parsed.hostname}:{parsed.port}"
 
     async def _block_unnecessary_assets(self, route, request) -> None:
         """Bloqueia imagens e mídia para reduzir uso de banda e acelerar o cadastro."""
@@ -1746,31 +1755,34 @@ class XATBrowserAutomation:
             )
             await self.context.route('**/*', self._block_unnecessary_assets)
 
-            stealth_config = Stealth(
-                webgl_vendor_override='Intel Inc.',
-                webgl_renderer_override='Intel(R) Iris(TM) Graphics 6100',
-                navigator_vendor_override='Google Inc.',
-                navigator_platform_override='Win32',
-                navigator_languages_override=('pt-BR', 'pt', 'en-US', 'en'),
-                navigator_user_agent_override=random.choice(self.user_agents),
-                chrome_app=True,
-                chrome_csi=True,
-                chrome_load_times=True,
-                chrome_runtime=False,
-                hairline=True,
-                iframe_content_window=True,
-                media_codecs=True,
-                navigator_hardware_concurrency=True,
-                navigator_languages=True,
-                navigator_permissions=True,
-                navigator_platform=True,
-                navigator_plugins=True,
-                navigator_webdriver=True,
-                error_prototype=True,
-                sec_ch_ua=True,
-                webgl_vendor=True
-            )
-            await stealth_config.apply_stealth_async(self.context)
+            try:
+                stealth_config = Stealth(
+                    webgl_vendor_override='Intel Inc.',
+                    webgl_renderer_override='Intel(R) Iris(TM) Graphics 6100',
+                    navigator_vendor_override='Google Inc.',
+                    navigator_platform_override='Win32',
+                    navigator_languages_override=('pt-BR', 'pt', 'en-US', 'en'),
+                    navigator_user_agent_override=random.choice(self.user_agents),
+                    chrome_app=True,
+                    chrome_csi=True,
+                    chrome_load_times=True,
+                    chrome_runtime=False,
+                    hairline=True,
+                    iframe_content_window=True,
+                    media_codecs=True,
+                    navigator_hardware_concurrency=True,
+                    navigator_languages=True,
+                    navigator_permissions=True,
+                    navigator_platform=True,
+                    navigator_plugins=True,
+                    navigator_webdriver=True,
+                    error_prototype=True,
+                    sec_ch_ua=True,
+                    webgl_vendor=True
+                )
+                await stealth_config.apply_stealth_async(self.context)
+            except Exception as e:
+                logger.warning(f"⚠️ Aplicação do stealth falhou: {e}, continuando sem stealth")
 
         except Exception as e:
             logger.error(f"❌ Falha ao criar contexto Playwright com proxy {self.current_proxy}: {e}")
