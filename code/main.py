@@ -1584,7 +1584,15 @@ class XATBrowserAutomation:
             # Aguardar carregamento do widget e resolver captcha
             captcha_resolved = False
             for attempt in range(max_proxy_retries):
-                captcha_resolved = await self._wait_for_captcha_resolution(page)
+                try:
+                    captcha_resolved = await self._wait_for_captcha_resolution(page)
+                    if captcha_resolved:
+                        break
+                except CloudflareHardBlockException as e:
+                    logger.warning(f"🚫 Cloudflare Hard Block detectado durante resolução de captcha: {e}")
+                    # Pular diretamente para próximo proxy sem tentar resolver captcha
+                    captcha_resolved = False
+
                 if captcha_resolved:
                     break
 
@@ -1596,8 +1604,12 @@ class XATBrowserAutomation:
                     return False
                 page = await self.context.new_page()
                 page.set_default_timeout(self.config['browser_automation'].get('page_timeout', 30000))
-                login_success = await self._access_login_page(page, user_id, k2_token)
-                if not login_success:
+                try:
+                    login_success = await self._access_login_page(page, user_id, k2_token)
+                    if not login_success:
+                        continue
+                except CloudflareHardBlockException as e:
+                    logger.warning(f"🚫 Cloudflare Hard Block detectado ao re-acessar login: {e}")
                     continue
 
             if not captcha_resolved:
@@ -1866,16 +1878,6 @@ class XATBrowserAutomation:
                 logger.warning("⚠️ Solver de captcha não está habilitado na configuração")
                 return False
 
-            # Verificação rápida para detectar bloqueio de rede (403, 503, etc)
-            try:
-                page_content = await page.content()
-                if any(indicator in page_content for indicator in ['403', 'Forbidden', 'Access Denied', '503 Service Unavailable', 'blocked', 'cloudflare']):
-                    logger.warning("⚠️ Página bloqueada (403/503) detectada - proxy inválido")
-                    self._blacklist_current_proxy("Página de login retornou erro de bloqueio (403/503)")
-                    return False
-            except Exception:
-                pass
-
             logger.info("🔒 Aguardando carregamento do widget de captcha...")
             await self._simulate_human_interaction(page)
 
@@ -1914,6 +1916,16 @@ class XATBrowserAutomation:
                         logger.info("✅ Sitekey encontrada no HTML após aguardar widget")
 
             if not sitekey:
+                # Só verifica bloqueio se não encontrou captcha na página
+                try:
+                    page_content = await page.content()
+                    if any(indicator in page_content for indicator in ['403', 'Forbidden', 'Access Denied', '503 Service Unavailable', 'blocked', 'cloudflare']):
+                        logger.warning("⚠️ Página bloqueada (403/503) detectada - proxy inválido")
+                        self._blacklist_current_proxy("Página de login retornou erro de bloqueio (403/503)")
+                        return False
+                except Exception:
+                    pass
+
                 reason = "Turnstile widget não carregou / sitekey não encontrado"
                 logger.warning(f"⚠️ {reason}")
                 self.last_captcha_block_reason = reason
