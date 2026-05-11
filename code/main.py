@@ -1099,71 +1099,32 @@ class XATAccountGenerator:
             logger.warning(f"⚠️ Erro ao extrair sitekey de JS: {e}")
         return None
 
-    def _resolver_recaptcha(self, sitekey: str, page_url: str) -> Optional[str]:
-        provider = self.config['captcha_solver'].get('provider', '2captcha')
-        api_key = self.config['captcha_solver'].get('api_key', '')
-
-        if provider != '2captcha':
-            logger.warning(f"⚠️ Provedor de captcha não suportado: {provider}")
-            return None
-
-        if not api_key:
-            logger.warning("⚠️ chave API de captcha não configurada em config.json")
-            return None
-
+    async def _extract_turnstile_payload(self, page: Page) -> Dict[str, Optional[str]]:
+        """Extrai payload adicional de Turnstile para enviar ao solver de captcha."""
         try:
-            method = 'turnstile' if sitekey.startswith('0x') else 'userrecaptcha'
-            logger.info(f"🔐 Enviando desafio reCAPTCHA/Turnstile para 2captcha (method={method}, sitekey={sitekey[:20]}..., pageurl={page_url})")
-            params = {
-                'key': api_key,
-                'method': method,
-                'pageurl': page_url,
-                'json': 1
-            }
-            if method == 'turnstile':
-                params['sitekey'] = sitekey
-                params['googlekey'] = sitekey
-            else:
-                params['googlekey'] = sitekey
-
-            resposta = requests.get(
-                'http://2captcha.com/in.php',
-                params=params,
-                timeout=30
+            result = await page.evaluate(
+                """
+                () => {
+                    const widget = document.querySelector('[data-sitekey], .cf-turnstile, .cf-turnstile-widget');
+                    const action = widget?.getAttribute('data-action') || widget?.dataset?.action || null;
+                    const extraData = widget?.getAttribute('data') || widget?.dataset?.data || null;
+                    const config = window.__cf_turnstile_config || window.turnstileConfig || {};
+                    return {
+                        action: action || config.action || null,
+                        data: extraData || config.data || null
+                    };
+                }
+                """
             )
-            dados = resposta.json()
-            if dados.get('status') != 1:
-                logger.warning(f"⚠️ 2captcha in.php falhou: {dados.get('request')}")
-                return None
+            if isinstance(result, dict):
+                return {
+                    'action': result.get('action'),
+                    'data': result.get('data')
+                }
+        except Exception:
+            pass
+        return {'action': None, 'data': None}
 
-            request_id = dados.get('request')
-            for _ in range(24):
-                time.sleep(5)
-                status_resp = requests.get(
-                    'http://2captcha.com/res.php',
-                    params={
-                        'key': api_key,
-                        'action': 'get',
-                        'id': request_id,
-                        'json': 1
-                    },
-                    timeout=30
-                )
-                status_data = status_resp.json()
-                if status_data.get('status') == 1:
-                    logger.info("✅ Retorno de reCAPTCHA recebido")
-                    return status_data.get('request')
-                if status_data.get('request') not in ['CAPCHA_NOT_READY', 'CAPTCHA_NOT_READY']:
-                    logger.warning(f"⚠️ 2captcha erro: {status_data.get('request')}")
-                    return None
-
-            logger.warning("⚠️ Tempo esgotado aguardando 2captcha")
-            return None
-
-        except Exception as e:
-            logger.warning(f"⚠️ Erro no solver de reCAPTCHA: {e}")
-            return None
-    
     def carregar_contas_existentes(self):
         """Carrega contas já criadas para evitar duplicatas"""
         arquivo = DATA_DIR / 'success_criacao.txt'
@@ -1868,7 +1829,8 @@ class XATBrowserAutomation:
                 return False
 
             page_url = page.url
-            token = self._resolver_recaptcha(sitekey, page_url)
+            payload = await self._extract_turnstile_payload(page)
+            token = self._resolver_recaptcha(sitekey, page_url, payload)
             if not token:
                 reason = "Solver de captcha não retornou token"
                 logger.warning(f"⚠️ {reason}")
@@ -1900,7 +1862,7 @@ class XATBrowserAutomation:
         """Instala um patch no Turnstile para capturar callbacks e aceitar token injetado."""
         try:
             await page.add_init_script(
-                source="""
+                """
                 () => {
                     const setupTurnstileInterceptor = () => {
                         if (window.turnstile && typeof window.turnstile === 'object') {
@@ -2113,8 +2075,8 @@ class XATBrowserAutomation:
 
             # Garantir que token de captcha está injetado
             await self._inject_captcha_token_if_missing(page)
-            logger.info("⏳ Aguardando 5s para o Cloudflare processar o token injetado antes de enviar o registro...")
-            await page.wait_for_timeout(5000)
+            logger.info("⏳ Aguardando 10s para o Cloudflare processar o token injetado antes de enviar o registro...")
+            await page.wait_for_timeout(10000)
 
             await page.evaluate(
                 """
@@ -2598,7 +2560,7 @@ class XATBrowserAutomation:
         except Exception:
             return page_url
 
-    def _resolver_recaptcha(self, sitekey: str, page_url: str, proxies: Optional[Dict[str, str]] = None) -> Optional[str]:
+    def _resolver_recaptcha(self, sitekey: str, page_url: str, payload: Optional[Dict[str, str]] = None, proxies: Optional[Dict[str, str]] = None) -> Optional[str]:
         """Resolve reCAPTCHA/Turnstile usando 2captcha."""
         provider = self.config['captcha_solver'].get('provider', '2captcha')
         api_key = self.config['captcha_solver'].get('api_key', '')
@@ -2623,8 +2585,22 @@ class XATBrowserAutomation:
             }
             if method == 'turnstile':
                 params['sitekey'] = sitekey
+                if payload:
+                    action = payload.get('action')
+                    extra_data = payload.get('data')
+                    if action:
+                        params['data[action]'] = action
+                    if extra_data:
+                        params['data'] = extra_data
             else:
                 params['googlekey'] = sitekey
+                if payload:
+                    action = payload.get('action')
+                    extra_data = payload.get('data')
+                    if action:
+                        params['data[action]'] = action
+                    if extra_data:
+                        params['data'] = extra_data
 
             response = requests.get('http://2captcha.com/in.php', params=params, timeout=90, proxies=proxies)
             data = response.json()
