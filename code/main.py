@@ -1811,8 +1811,7 @@ class XATBrowserAutomation:
                     self._blacklist_current_proxy("Página login com título vazio após Cloudflare bypass")
                     raise Exception("Página de login carregou com título vazio - proxy bloqueado")
                 else:
-                    logger.warning(f"⚠️ Página suspeita carregada: {title}. Tentando continuar...")
-
+                    logger.info(f"ℹ️ Página suspeita carregada: {title}. Tentando continuar...")
             # Dar um breve tempo para o DOM ser atualizado pelo JavaScript
             await page.wait_for_timeout(1000)
             await self._simulate_human_interaction(page)
@@ -2444,13 +2443,34 @@ class XATBrowserAutomation:
                 () => {
                     const getSitekeyFromElement = (element) => {
                         if (!element) return null;
-                        return element.dataset?.sitekey || element.getAttribute('data-sitekey') || element.getAttribute('sitekey');
+                        return element.dataset?.sitekey || element.dataset?.cfTurnstileSitekey || element.getAttribute('data-sitekey') || element.getAttribute('data-cf-turnstile-sitekey') || element.getAttribute('sitekey');
                     };
 
-                    const widget = document.querySelector('[data-sitekey], .cf-turnstile, .g-recaptcha');
-                    const sitekeyFromWidget = getSitekeyFromElement(widget);
-                    if (sitekeyFromWidget) {
-                        return sitekeyFromWidget;
+                    const isVisible = (element) => {
+                        if (!element) return false;
+                        const rect = element.getBoundingClientRect();
+                        const style = window.getComputedStyle(element);
+                        return rect.width > 0 && rect.height > 0 && style.visibility !== 'hidden' && style.display !== 'none' && style.opacity !== '0';
+                    };
+
+                    const visibleKeys = [];
+                    const hiddenKeys = [];
+                    const widgets = document.querySelectorAll('[data-sitekey], [data-cf-turnstile-sitekey], .cf-turnstile, .g-recaptcha');
+                    widgets.forEach(widget => {
+                        const key = getSitekeyFromElement(widget);
+                        if (!key) return;
+                        if (isVisible(widget)) {
+                            visibleKeys.push(key);
+                        } else {
+                            hiddenKeys.push(key);
+                        }
+                    });
+
+                    if (visibleKeys.length) {
+                        return visibleKeys[0];
+                    }
+                    if (hiddenKeys.length) {
+                        return hiddenKeys[0];
                     }
 
                     const iframe = document.querySelector('iframe[src*="turnstile"]');
@@ -2737,9 +2757,11 @@ class XATBrowserAutomation:
                 'json': 1
             }
             if method == 'turnstile':
-                params['sitekey'] = sitekey
-                # Só envia action e data se existirem e forem válidos
+                params['sitekey'] = sitekey.strip()
+                # Forçar action padrão para xat login se não houver action explícito
                 action = payload.get('action') if payload else None
+                if not action and 'xat.com' in normalized_pageurl:
+                    action = 'login'
                 if action and action.strip():
                     params['data[action]'] = action.strip()
                 extra_data = payload.get('data') if payload else None
@@ -2747,7 +2769,7 @@ class XATBrowserAutomation:
                     params['data'] = extra_data.strip()
 
                 # Log detalhado dos parâmetros sendo enviados
-                logger.info(f"🔍 Parâmetros 2Captcha: key=***, method={method}, sitekey={sitekey}, pageurl={normalized_pageurl}")
+                logger.info(f"🔍 Parâmetros 2Captcha: key=***, method={method}, sitekey={params['sitekey']}, pageurl={normalized_pageurl}")
                 if 'data[action]' in params:
                     logger.info(f"🔍 data[action]={params['data[action]']}")
                 if 'data' in params:
