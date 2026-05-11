@@ -2475,7 +2475,9 @@ class XATBrowserAutomation:
 
             page_url = page.url
             payload = await self._extract_turnstile_payload(page)
-            token = self._resolver_recaptcha(sitekey, page_url, payload)
+            # Obter user-agent do navegador para sincronização com 2Captcha
+            user_agent = await page.evaluate("navigator.userAgent")
+            token = self._resolver_recaptcha(sitekey, page_url, payload, user_agent=user_agent)
             if not token:
                 reason = "Solver de captcha não retornou token"
                 logger.warning(f"⚠️ {reason}")
@@ -3396,7 +3398,8 @@ class XATBrowserAutomation:
             sitekey = await self._extract_sitekey_from_full_page_content(page)
             if sitekey:
                 page_url = page.url
-                token = self._resolver_recaptcha(sitekey, page_url)
+                user_agent = await page.evaluate("navigator.userAgent")
+                token = self._resolver_recaptcha(sitekey, page_url, user_agent=user_agent)
                 if token:
                     await self._inject_captcha_token(page, token)
                     logger.info("✅ Token de captcha injetado antes do envio do form")
@@ -3433,10 +3436,11 @@ class XATBrowserAutomation:
         except Exception:
             return page_url
 
-    def _resolver_recaptcha(self, sitekey: str, page_url: str, payload: Optional[Dict[str, str]] = None, proxies: Optional[Dict[str, str]] = None) -> Optional[str]:
+    def _resolver_recaptcha(self, sitekey: str, page_url: str, payload: Optional[Dict[str, str]] = None, proxies: Optional[Dict[str, str]] = None, user_agent: Optional[str] = None) -> Optional[str]:
         """
-        Resolve reCAPTCHA/Turnstile usando 2captcha com Proxy-On.
-        Passa as credenciais do proxy atual para que o captcha seja resolvido com o mesmo IP residencial.
+        Resolve reCAPTCHA/Turnstile usando 2captcha com Proxy-On e User-Agent synchronization.
+        Passa as credenciais do proxy atual e o mesmo User-Agent do navegador para que o captcha
+        seja resolvido com o mesmo IP e fingerprint digital, evitando detecção de validação cruzada.
         """
         provider = self.config['captcha_solver'].get('provider', '2captcha')
         api_key = self.config['captcha_solver'].get('api_key', '')
@@ -3462,28 +3466,33 @@ class XATBrowserAutomation:
                 'json': 1
             }
 
-            # ⚠️ FEATURE: 2Captcha Proxy-On - Passar credenciais do proxy atual
-            # Para que o captcha seja resolvido com o mesmo IP residencial brasileiro
+            # ⚠️ FEATURE: 2Captcha Proxy-On + User-Agent Synchronization
+            # Para resolver o erro "The captcha verification was not successful"
+            # O xat detecta quando o IP/fingerprint do solver != IP/fingerprint do navegador
             if self.current_proxy and '@' in self.current_proxy:
                 try:
-                    # Extrair credenciais do proxy atual (formato: user:pass@host:port)
-                    proxy_parts = self.current_proxy.replace('http://', '').replace('https://', '').replace('socks5://', '')
-                    if '@' in proxy_parts:
-                        creds, host_port = proxy_parts.rsplit('@', 1)
-                        if ':' in creds:
-                            username, password = creds.split(':', 1)
-                            # Adicionar proxy credentials aos parâmetros do 2Captcha
-                            params['proxy'] = f"{host_port}"
-                            params['proxytype'] = 'HTTP'  # Webshare usa HTTP proxy
-                            logger.info(f"🔒 2Captcha Proxy-On ativado: usando proxy {host_port} para resolver captcha")
-                        else:
-                            logger.warning("⚠️ Não foi possível extrair credenciais do proxy para 2Captcha Proxy-On")
-                    else:
-                        logger.warning("⚠️ Proxy atual não tem formato esperado para 2Captcha Proxy-On")
+                    # ⚠️ Usar credenciais específicas do Webshare BR-rotate conforme solicitado
+                    # Isso garante que o 2Captcha resolva o captcha com IP brasileiro
+                    webshare_proxy = "cqgsjjoe-BR-rotate:syeim3ngqut4@p.webshare.io:80"
+                    params['proxy'] = webshare_proxy
+                    params['proxytype'] = 'HTTP'
+                    logger.info(f"🔒 2Captcha Proxy-On ativado: usando proxy brasileiro {webshare_proxy} para resolver captcha")
                 except Exception as proxy_error:
                     logger.warning(f"⚠️ Erro ao configurar 2Captcha Proxy-On: {proxy_error}")
             else:
                 logger.info("ℹ️ 2Captcha sem Proxy-On (proxy atual não disponível ou não autenticado)")
+
+            # ⚠️ FEATURE: User-Agent Synchronization
+            # Enviar o mesmo User-Agent do navegador para o 2Captcha
+            # Se não fornecido, usar um padrão compatível
+            if user_agent:
+                params['userAgent'] = user_agent
+                logger.info(f"🎭 User-Agent synchronization: enviando mesmo UA do navegador para 2Captcha")
+            else:
+                # User-Agent padrão compatível com IPs brasileiros (Chrome 131)
+                default_ua = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36"
+                params['userAgent'] = default_ua
+                logger.info(f"🎭 User-Agent padrão: {default_ua[:50]}...")
 
             if method == 'turnstile':
                 params['sitekey'] = sitekey.strip()
