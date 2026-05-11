@@ -20,6 +20,11 @@ from typing import List, Dict, Optional, Tuple, Set
 from urllib.parse import urljoin, parse_qs, urlencode, urlparse
 from bs4 import BeautifulSoup
 
+# Custom exceptions
+class CloudflareHardBlockException(Exception):
+    """Raised when Cloudflare presents a hard block that requires proxy rotation."""
+    pass
+
 # Playwright imports
 try:
     from playwright.async_api import async_playwright, Browser, Page, BrowserContext, Locator
@@ -1355,9 +1360,14 @@ class XATBrowserAutomation:
             logger.warning(f"⚠️ Erro ao limpar recursos: {e}")
 
     def _choose_next_proxy(self, exclude_current: bool = True) -> Optional[str]:
-        """Escolhe o próximo proxy da lista, evitando o atual se possível."""
+        """Escolhe o próximo proxy da lista, usando Tor como fallback se não houver proxies disponíveis."""
         if not self.proxies:
-            return None
+            # Fallback para Tor se não houver proxies disponíveis
+            logger.warning("⚠️ Nenhum proxy disponível na lista. Tentando usar Tor como fallback...")
+            tor_proxy = "socks5://127.0.0.1:9050"
+            self.current_proxy = tor_proxy
+            logger.info(f"🌐 Usando Tor como proxy fallback: {tor_proxy}")
+            return tor_proxy
 
         options = [p for p in self.proxies if p != self.current_proxy] if exclude_current else list(self.proxies)
         if not options:
@@ -1372,9 +1382,28 @@ class XATBrowserAutomation:
         return self.current_proxy
 
     def _build_proxy_settings(self, proxy: Optional[str]) -> Optional[Dict[str, str]]:
-        """Constrói as configurações de proxy para o Playwright."""
+        """Constrói as configurações de proxy para o Playwright, incluindo suporte a SOCKS5 (Tor)."""
         if not proxy:
             return None
+
+        # Suporte especial para Tor (SOCKS5)
+        if proxy.startswith('socks5://'):
+            proxy_clean = proxy.replace('socks5://', '')
+            if '@' in proxy_clean:
+                credentials, server = proxy_clean.rsplit('@', 1)
+                username, password = credentials.split(':', 1)
+                if ':' in server:
+                    ip, port = server.rsplit(':', 1)
+                    return {
+                        'server': f'socks5://{ip}:{port}',
+                        'username': username,
+                        'password': password
+                    }
+            elif ':' in proxy_clean:
+                ip, port = proxy_clean.rsplit(':', 1)
+                return {
+                    'server': f'socks5://{ip}:{port}'
+                }
 
         # Remove 'http://' se presente
         proxy_clean = proxy.replace('http://', '').replace('https://', '')
@@ -1446,6 +1475,15 @@ class XATBrowserAutomation:
         if not self.proxies:
             logger.error("❌ Nenhum proxy disponível para rotacionar")
             return False
+
+        # Reset Tor service before rotating proxy (Linux only)
+        try:
+            logger.info("🔄 Resetando serviço Tor...")
+            os.system('sudo systemctl restart tor')
+            await asyncio.sleep(2)  # Wait for Tor to restart
+            logger.info("✅ Tor resetado com sucesso")
+        except Exception as e:
+            logger.debug(f"⚠️ Não foi possível resetar Tor (pode não estar instalado): {e}")
 
         self._choose_next_proxy()
         try:
@@ -1519,7 +1557,15 @@ class XATBrowserAutomation:
             # Passo 2: Acessar página de login com retry de proxy ao detectar bloqueio ou shadowban
             login_success = False
             for attempt in range(max_proxy_retries):
-                login_success = await self._access_login_page(page, user_id, k2_token)
+                try:
+                    login_success = await self._access_login_page(page, user_id, k2_token)
+                    if login_success:
+                        break
+                except CloudflareHardBlockException as e:
+                    logger.warning(f"🚫 Cloudflare Hard Block detectado: {e}")
+                    # Não é um erro do método, é sinal para rotacionar proxy
+                    login_success = False
+
                 if login_success:
                     break
 
@@ -1723,9 +1769,13 @@ class XATBrowserAutomation:
                     title = await page.title()
                     logger.info(f"✅ Página carregou após intersticial: {title}")
                     
-                    # Validação: se título continua vazio/suspeito, o proxy/bloqueio persistiu
+                    # Failsafe: se título continua vazio após intersticial, é bloqueio hard
                     if not title or title.strip() == '':
-                        raise Exception("Título de página permanece vazio após Cloudflare - bloqueio contínuo detectado")
+                        logger.warning("🚫 Cloudflare Hard Block detectado - título permanece vazio após 15s")
+                        raise CloudflareHardBlockException("Página intersticial Cloudflare resultou em bloqueio hard - proxy precisa ser rotacionado")
+                except CloudflareHardBlockException:
+                    # Re-lançar para que o loop de retry capture e rotacione proxy
+                    raise
                 except Exception as e:
                     logger.warning(f"⚠️ Timeout aguardando página após Cloudflare: {e}")
                     self._blacklist_current_proxy(f"Página intersticial Cloudflare não carregou ou título vazio: {e}")
