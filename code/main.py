@@ -1983,8 +1983,36 @@ class XATBrowserAutomation:
 
             await page.wait_for_timeout(1500)
 
+            try:
+                await page.click('.cf-turnstile', force=True)
+                logger.info("✅ Clique forçado no widget Turnstile antes da injeção")
+            except Exception:
+                pass
+
+            try:
+                await page.click('[data-sitekey]', force=True)
+                logger.info("✅ Clique forçado no elemento de sitekey antes da injeção")
+            except Exception:
+                pass
+
             # Garantir que token de captcha está injetado
             await self._inject_captcha_token_if_missing(page)
+            logger.info("⏳ Aguardando 5s para o Cloudflare processar o token injetado antes de enviar o registro...")
+            await page.wait_for_timeout(5000)
+
+            await page.evaluate(
+                """
+                () => {
+                    const registerButton = document.querySelector('a#butregister');
+                    if (registerButton) {
+                        registerButton.classList.remove('disabled');
+                        registerButton.removeAttribute('disabled');
+                    }
+                }
+                """
+            )
+
+            logger.info("✅ Aguarde concluído; enviando o registro imediatamente a seguir")
 
             # Clicar no botão de submit (é um <a>, não <button>)
             submit_found = False
@@ -2350,10 +2378,23 @@ class XATBrowserAutomation:
                     }
                 };
 
+                window.cf_token = token;
+                window.turnstileToken = token;
+                window.grecaptchaResponse = token;
+                window.recaptchaResponse = token;
+                window.xatCaptchaToken = token;
+
                 document.querySelectorAll('[data-callback], [data-recaptcha-callback], [data-sitekey]').forEach(element => {
                     const callbackName = element.getAttribute('data-callback') || element.getAttribute('data-recaptcha-callback');
                     invokeCallback(callbackName);
                 });
+
+                const widget = document.querySelector('.cf-turnstile');
+                if (widget && typeof widget.click === 'function') {
+                    try {
+                        widget.click();
+                    } catch (e) {}
+                }
 
                 if (window.turnstile && typeof window.turnstile === 'object') {
                     try {
