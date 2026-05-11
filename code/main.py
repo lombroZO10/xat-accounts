@@ -1819,13 +1819,13 @@ class XATBrowserAutomation:
             await self.context.route('**/*', self._block_unnecessary_assets)
 
             try:
+                logger.info("🎭 Aplicando configurações de stealth (playwright-stealth)...")
                 stealth_config = Stealth(
                     webgl_vendor_override='Intel Inc.',
                     webgl_renderer_override='Intel(R) Iris(TM) Graphics 6100',
                     navigator_vendor_override='Google Inc.',
                     navigator_platform_override='Win32',
                     navigator_languages_override=('pt-BR', 'pt', 'en-US', 'en'),
-                    navigator_user_agent_override=random.choice(self.user_agents),
                     chrome_app=True,
                     chrome_csi=True,
                     chrome_load_times=True,
@@ -1844,8 +1844,23 @@ class XATBrowserAutomation:
                     webgl_vendor=True
                 )
                 await stealth_config.apply_stealth_async(self.context)
+                logger.info("✅ Stealth aplicado com sucesso")
+            except AttributeError as ae:
+                logger.warning(f"⚠️ Erro AttributeError ao aplicar stealth: {ae}")
+                logger.info("💡 Tentando aplicar stealth sem sobrescrita de user_agent...")
+                try:
+                    stealth_minimal = Stealth(
+                        chrome_app=True,
+                        navigator_webdriver=True,
+                        hairline=True,
+                        webgl_vendor=True
+                    )
+                    await stealth_minimal.apply_stealth_async(self.context)
+                    logger.info("✅ Stealth mínimo aplicado com sucesso")
+                except Exception as e2:
+                    logger.warning(f"⚠️ Stealth mínimo também falhou: {e2}, continuando sem stealth")
             except Exception as e:
-                logger.warning(f"⚠️ Aplicação do stealth falhou: {e}, continuando sem stealth")
+                logger.warning(f"⚠️ Erro geral ao aplicar stealth: {e}, continuando sem stealth")
 
         except Exception as e:
             logger.error(f"❌ Falha ao criar contexto Playwright com proxy {self.current_proxy}: {e}")
