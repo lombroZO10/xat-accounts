@@ -1460,11 +1460,11 @@ class XATBrowserAutomation:
         self.last_login_block_reason: Optional[str] = None
         self.last_captcha_block_reason: Optional[str] = None
         self.user_agents = [
-            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36",
-            "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:122.0) Gecko/20100101 Firefox/122.0",
-            "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36",
-            "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36",
-            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Edge/126.0.0.0"
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/140.0.0.0 Safari/537.36",
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:135.0) Gecko/20100101 Firefox/135.0",
+            "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/140.0.0.0 Safari/537.36",
+            "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/140.0.0.0 Safari/537.36",
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Edge/140.0.0.0"
         ]
 
         if not PLAYWRIGHT_AVAILABLE:
@@ -1506,7 +1506,7 @@ class XATBrowserAutomation:
             logger.warning(f"⚠️ Erro ao limpar recursos: {e}")
 
     def _choose_next_proxy(self, exclude_current: bool = True) -> Optional[str]:
-        """Escolhe o próximo proxy da lista."""
+        """Escolhe o próximo proxy da lista, validando conectividade."""
         if not self.proxies:
             logger.error("❌ Nenhum proxy disponível na lista. Não há fallback para Tor quando proxies SOCKS5 autenticados são usados.")
             return None
@@ -1515,14 +1515,23 @@ class XATBrowserAutomation:
         if not options:
             options = list(self.proxies)
 
-        self.current_proxy = random.choice(options)
-        proxy_display = self.current_proxy.replace('http://', '').replace('https://', '')
-        if '@' in proxy_display:
-            proxy_display = proxy_display.split('@', 1)[1]
-        logger.info(f"🌐 Proxy selecionado: {proxy_display}")
-        if self.current_proxy.startswith('socks5://'):
-            logger.info("✅ Proxy SOCKS5 selecionado")
-        return self.current_proxy
+        random.shuffle(options)  # Embaralhar para tentar diferentes proxies
+
+        for proxy_candidate in options:
+            if self._validate_proxy_connectivity(proxy_candidate):
+                self.current_proxy = proxy_candidate
+                proxy_display = self.current_proxy.replace('http://', '').replace('https://', '')
+                if '@' in proxy_display:
+                    proxy_display = proxy_display.split('@', 1)[1]
+                logger.info(f"🌐 Proxy selecionado e validado: {proxy_display}")
+                if self.current_proxy.startswith('socks5://'):
+                    logger.info("✅ Proxy SOCKS5 selecionado")
+                return self.current_proxy
+            else:
+                logger.warning(f"🚫 Proxy {proxy_candidate} falhou na validação, tentando próximo...")
+
+        logger.error("❌ Nenhum proxy passou na validação de conectividade")
+        return None
 
     def _set_current_proxy(self, proxy: Optional[str]) -> None:
         """Define o proxy atual."""
@@ -1564,6 +1573,25 @@ class XATBrowserAutomation:
             proxy_config['password'] = parsed.password
 
         return proxy_config
+
+    def _validate_proxy_connectivity(self, proxy_str: str) -> bool:
+        """Valida se o proxy responde a uma requisição rápida antes de abrir o navegador."""
+        try:
+            proxy_dict = self._build_proxy_dict(proxy_str)
+            if not proxy_dict:
+                return False
+
+            # Teste rápido com httpbin.org/ip (timeout de 10s)
+            response = requests.get(
+                'https://httpbin.org/ip',
+                proxies=proxy_dict,
+                timeout=10,
+                headers={'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'}
+            )
+            return response.status_code == 200
+        except Exception as e:
+            logger.warning(f"⚠️ Proxy {proxy_str} falhou na validação: {e}")
+            return False
 
     def _start_local_http_proxy(self, upstream_proxy: Dict[str, str]) -> Optional[Dict[str, str]]:
         """Inicia um proxy HTTP local que encaminha tráfego via SOCKS5 autenticado."""
@@ -2132,7 +2160,7 @@ class XATBrowserAutomation:
             await self._simulate_human_interaction(page)
 
             captcha_timeout = max(self.config['browser_automation'].get('captcha_timeout', 15), 15)
-            wait_timeout = min(captcha_timeout * 1000, 15000)  # Até 15s para widgets de Turnstile
+            wait_timeout = min(captcha_timeout * 1000, 60000)  # Até 60s para widgets de Turnstile
 
             await page.wait_for_load_state('networkidle', timeout=wait_timeout)
 
@@ -2862,11 +2890,11 @@ class XATBrowserAutomation:
     def _build_extra_http_headers(self, user_agent: str) -> Dict[str, str]:
         """Retorna cabeçalhos Client Hints compatíveis com o User-Agent escolhido."""
         if 'Edg/' in user_agent or 'Edge/' in user_agent:
-            brand = '"Chromium";v="126", "Microsoft Edge";v="126", ";Not A Brand";v="99"'
+            brand = '"Chromium";v="140", "Microsoft Edge";v="140", ";Not A Brand";v="99"'
         elif 'Firefox/' in user_agent:
-            brand = '"Mozilla";v="120", "Firefox";v="120", ";Not A Brand";v="99"'
+            brand = '"Mozilla";v="135", "Firefox";v="135", ";Not A Brand";v="99"'
         else:
-            brand = '"Chromium";v="126", "Google Chrome";v="126", ";Not A Brand";v="99"'
+            brand = '"Chromium";v="140", "Google Chrome";v="140", ";Not A Brand";v="99"'
 
         platform = '"Windows"' if 'Windows' in user_agent else '"Linux"'
 
