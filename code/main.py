@@ -1897,6 +1897,7 @@ class XATBrowserAutomation:
             sitekey = await self._extract_sitekey_from_full_page_content(page)
             if sitekey:
                 logger.info(f"✅ Sitekey encontrada via regex/HTML antes do widget visível: {sitekey}")
+                # Se encontrou via HTML, não precisa esperar widget - envia imediatamente
             else:
                 logger.info(f"🔍 Sitekey não encontrada no HTML, aguardando widget visível por até {wait_timeout // 1000}s")
                 await page.wait_for_function(
@@ -2697,15 +2698,20 @@ class XATBrowserAutomation:
             }
             if method == 'turnstile':
                 params['sitekey'] = sitekey
-                # Força action padrão para xat.com se não conseguir extrair
+                # Só envia action e data se existirem e forem válidos
                 action = payload.get('action') if payload else None
-                if not action and 'xat.com' in normalized_pageurl:
-                    action = 'login'  # Action padrão para xat login
-                if action:
-                    params['data[action]'] = action
+                if action and action.strip():
+                    params['data[action]'] = action.strip()
                 extra_data = payload.get('data') if payload else None
-                if extra_data:
-                    params['data'] = extra_data
+                if extra_data and extra_data.strip():
+                    params['data'] = extra_data.strip()
+
+                # Log detalhado dos parâmetros sendo enviados
+                logger.info(f"🔍 Parâmetros 2Captcha: key=***, method={method}, sitekey={sitekey}, pageurl={normalized_pageurl}")
+                if 'data[action]' in params:
+                    logger.info(f"🔍 data[action]={params['data[action]']}")
+                if 'data' in params:
+                    logger.info(f"🔍 data={params['data']}")
             else:
                 params['googlekey'] = sitekey
                 if payload:
