@@ -1099,32 +1099,6 @@ class XATAccountGenerator:
             logger.warning(f"⚠️ Erro ao extrair sitekey de JS: {e}")
         return None
 
-    async def _extract_turnstile_payload(self, page: Page) -> Dict[str, Optional[str]]:
-        """Extrai payload adicional de Turnstile para enviar ao solver de captcha."""
-        try:
-            result = await page.evaluate(
-                """
-                () => {
-                    const widget = document.querySelector('[data-sitekey], .cf-turnstile, .cf-turnstile-widget');
-                    const action = widget?.getAttribute('data-action') || widget?.dataset?.action || null;
-                    const extraData = widget?.getAttribute('data') || widget?.dataset?.data || null;
-                    const config = window.__cf_turnstile_config || window.turnstileConfig || {};
-                    return {
-                        action: action || config.action || null,
-                        data: extraData || config.data || null
-                    };
-                }
-                """
-            )
-            if isinstance(result, dict):
-                return {
-                    'action': result.get('action'),
-                    'data': result.get('data')
-                }
-        except Exception:
-            pass
-        return {'action': None, 'data': None}
-
     def carregar_contas_existentes(self):
         """Carrega contas já criadas para evitar duplicatas"""
         arquivo = DATA_DIR / 'success_criacao.txt'
@@ -1777,12 +1751,48 @@ class XATBrowserAutomation:
             logger.error(f"❌ Erro ao acessar página de login: {e}")
             return False
 
+    async def _extract_turnstile_payload(self, page: Page) -> Dict[str, Optional[str]]:
+        """Extrai payload adicional de Turnstile para enviar ao solver de captcha."""
+        try:
+            result = await page.evaluate(
+                """
+                () => {
+                    const widget = document.querySelector('[data-sitekey], .cf-turnstile, .cf-turnstile-widget');
+                    const action = widget?.getAttribute('data-action') || widget?.dataset?.action || null;
+                    const extraData = widget?.getAttribute('data') || widget?.dataset?.data || null;
+                    const config = window.__cf_turnstile_config || window.turnstileConfig || {};
+                    return {
+                        action: action || config.action || null,
+                        data: extraData || config.data || null
+                    };
+                }
+                """
+            )
+            if isinstance(result, dict):
+                return {
+                    'action': result.get('action'),
+                    'data': result.get('data')
+                }
+        except Exception:
+            pass
+        return {'action': None, 'data': None}
+
     async def _wait_for_captcha_resolution(self, page: Page) -> bool:
         """Resolve o captcha usando solver e injeta o token no formulário."""
         try:
             if not self.config['captcha_solver'].get('enabled', False):
                 logger.warning("⚠️ Solver de captcha não está habilitado na configuração")
                 return False
+
+            # Verificação rápida para detectar bloqueio de rede (403, 503, etc)
+            try:
+                page_content = await page.content()
+                if any(indicator in page_content for indicator in ['403', 'Forbidden', 'Access Denied', '503 Service Unavailable', 'blocked', 'cloudflare']):
+                    logger.warning("⚠️ Página bloqueada (403/503) detectada - proxy inválido")
+                    self._blacklist_current_proxy("Página de login retornou erro de bloqueio (403/503)")
+                    return False
+            except Exception:
+                pass
 
             logger.info("🔒 Aguardando carregamento do widget de captcha...")
             await self._simulate_human_interaction(page)
