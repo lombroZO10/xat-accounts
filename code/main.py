@@ -1470,6 +1470,16 @@ class XATBrowserAutomation:
         stealth_config = Stealth()
         await stealth_config.apply_stealth_async(self.context)
 
+    async def _clear_browser_context_identity(self) -> None:
+        """Limpa cookies e permissões do contexto antes de iniciar um novo username."""
+        try:
+            if self.context:
+                await self.context.clear_cookies()
+                await self.context.clear_permissions()
+                logger.info("✅ Cookies e permissões do contexto limpos para nova tentativa")
+        except Exception as e:
+            logger.warning(f"⚠️ Falha ao limpar identidade do contexto: {e}")
+
     async def _rotate_proxy_and_recreate(self) -> bool:
         """Seleciona um novo proxy e recria o contexto do navegador."""
         if not self.proxies:
@@ -1530,6 +1540,7 @@ class XATBrowserAutomation:
             logger.info(f"🎭 Iniciando criação de conta: {username} | {email}")
 
             max_proxy_retries = self.config['browser_automation'].get('max_proxy_retries', 3)
+            await self._clear_browser_context_identity()
             page = await self.context.new_page()
             page.set_default_timeout(self.config['browser_automation'].get('page_timeout', 30000))
 
@@ -1558,6 +1569,17 @@ class XATBrowserAutomation:
             login_success = False
             for attempt in range(max_proxy_retries):
                 try:
+                    if attempt > 0:
+                        logger.info("🔄 Obtendo novo UserID/k2 para nova tentativa de login")
+                        new_user_data = await self._get_user_data(page)
+                        if new_user_data and new_user_data.get('UserId'):
+                            user_id = new_user_data.get('UserId')
+                            if new_user_data.get('k2'):
+                                k2_token = new_user_data.get('k2')
+                            logger.info(f"✅ Novo UserID obtido para retry: {user_id}")
+                        else:
+                            logger.warning("⚠️ Falha ao obter novo UserID/k2 no retry; usando UserID anterior")
+
                     login_success = await self._access_login_page(page, user_id, k2_token)
                     if login_success:
                         break
@@ -2191,6 +2213,16 @@ class XATBrowserAutomation:
                 logger.info("✅ Clique forçado no elemento de sitekey antes da injeção")
             except Exception:
                 pass
+
+            try:
+                widget = page.locator('.cf-turnstile').first
+                if await widget.count() > 0:
+                    box = await widget.bounding_box()
+                    if box:
+                        await page.mouse.click(box['x'] + box['width'] / 2, box['y'] + box['height'] / 2, force=True)
+                        logger.info("✅ Clique físico no centro do widget Turnstile antes da injeção")
+            except Exception as e:
+                logger.debug(f"⚠️ Falha no clique físico do widget Turnstile: {e}")
 
             # Garantir que token de captcha está injetado
             await self._inject_captcha_token_if_missing(page)
