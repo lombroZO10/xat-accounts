@@ -2071,6 +2071,29 @@ class XATBrowserAutomation:
                 except:
                     pass
 
+            if not k2:
+                try:
+                    js_k2 = await page.evaluate("""
+                        () => {
+                            const all = Array.from(document.querySelectorAll('*'));
+                            const found = all.find(el => {
+                                const name = (el.getAttribute('name') || '').toLowerCase();
+                                const id = (el.getAttribute('id') || '').toLowerCase();
+                                const attrs = Array.from(el.attributes).map(a => a.name.toLowerCase());
+                                return name.includes('k2') || id.includes('k2') || attrs.some(attr => attr.includes('k2'));
+                            });
+                            if (found) {
+                                return found.value || found.getAttribute('data-k2') || found.getAttribute('value');
+                            }
+                            return window.k2 || window.__k2 || null;
+                        }
+                    """)
+                    if js_k2:
+                        k2 = str(js_k2)
+                        logger.info(f"✅ k2 extraído via fallback genérico: {k2[:30]}...")
+                except Exception:
+                    pass
+
             if user_id and k2:
                 logger.info(f"✅ UserData obtido com sucesso: UserId={user_id}")
                 return {'UserId': user_id, 'k2': k2}
@@ -2555,8 +2578,8 @@ class XATBrowserAutomation:
 
             # Não clicar mais no widget do Turnstile. Injetar token e seguir direto para o submit.
             await self._inject_captcha_token_if_missing(page)
-            logger.info("⏳ Aguardando 1s para o Cloudflare processar o token injetado antes de enviar o registro...")
-            await page.wait_for_timeout(1000)
+            logger.info("⏳ Aguardando 3.5s para o Cloudflare processar o token injetado antes de enviar o registro...")
+            await page.wait_for_timeout(3500)
 
             await page.evaluate(
                 """
@@ -3083,10 +3106,10 @@ class XATBrowserAutomation:
             token
         )
         
-        # ⚠️ FEATURE 2: Aguarda um momento para garantir que o callback foi processado
-        # Isto dá tempo para o JavaScript do xat processar a notificação cf_callback
-        await page.wait_for_timeout(300)
-        logger.debug("✅ Aguardado 300ms para sincronizar callbacks do captcha")
+        # ⚠️ FEATURE 2: Aguarda um momento maior para garantir que o callback foi processado
+        # Isto dá tempo para o JavaScript do xat processar a notificação cf_callback/Turnstile
+        await page.wait_for_timeout(3500)
+        logger.debug("✅ Aguardado 3500ms para sincronizar callbacks do captcha")
 
 
     async def _inject_captcha_token_if_missing(self, page: Page) -> None:
