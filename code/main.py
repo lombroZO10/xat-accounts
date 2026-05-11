@@ -1563,8 +1563,16 @@ class XATBrowserAutomation:
                         break
                 except CloudflareHardBlockException as e:
                     logger.warning(f"🚫 Cloudflare Hard Block detectado: {e}")
-                    # Não é um erro do método, é sinal para rotacionar proxy
+                    # Força rotação imediata de proxy
                     login_success = False
+                    await page.close()
+                    if attempt == max_proxy_retries - 1:
+                        return False
+                    if not await self._rotate_proxy_and_recreate():
+                        return False
+                    page = await self.context.new_page()
+                    page.set_default_timeout(self.config['browser_automation'].get('page_timeout', 30000))
+                    continue  # Pula para próxima iteração do loop
 
                 if login_success:
                     break
@@ -2689,13 +2697,15 @@ class XATBrowserAutomation:
             }
             if method == 'turnstile':
                 params['sitekey'] = sitekey
-                if payload:
-                    action = payload.get('action')
-                    extra_data = payload.get('data')
-                    if action:
-                        params['data[action]'] = action
-                    if extra_data:
-                        params['data'] = extra_data
+                # Força action padrão para xat.com se não conseguir extrair
+                action = payload.get('action') if payload else None
+                if not action and 'xat.com' in normalized_pageurl:
+                    action = 'login'  # Action padrão para xat login
+                if action:
+                    params['data[action]'] = action
+                extra_data = payload.get('data') if payload else None
+                if extra_data:
+                    params['data'] = extra_data
             else:
                 params['googlekey'] = sitekey
                 if payload:
