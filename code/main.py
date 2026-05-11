@@ -1462,13 +1462,19 @@ class XATBrowserAutomation:
         self.last_login_block_reason: Optional[str] = None
         self.last_captcha_block_reason: Optional[str] = None
         self.user_agents = [
-            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.6419.46 Safari/537.36",
-            "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:139.0) Gecko/20100101 Firefox/139.0",
-            "Mozilla/5.0 (Macintosh; Intel Mac OS X 14_2_1) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.1 Safari/605.1.15",
-            "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.6490.102 Safari/537.36",
-            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Edge/126.0.2429.60",
-            "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:137.0) Gecko/20100101 Firefox/137.0",
-            "Mozilla/5.0 (Macintosh; Intel Mac OS X 14_1) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.6480.88 Safari/537.36"
+            # User-Agents atualizados para 2026 - compatíveis com IPs brasileiros
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36",
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0.0.0 Safari/537.36",
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/129.0.0.0 Safari/537.36",
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/128.0.0.0 Safari/537.36",
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:133.0) Gecko/20100101 Firefox/133.0",
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:132.0) Gecko/20100101 Firefox/132.0",
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Edge/131.0.0.0",
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Edge/130.0.0.0",
+            "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36",
+            "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/18.1.1 Safari/605.1.15",
+            "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36",
+            "Mozilla/5.0 (X11; Ubuntu; Linux x86_64; rv:133.0) Gecko/20100101 Firefox/133.0"
         ]
         self.screen_resolutions = [
             {'width': 1366, 'height': 768},
@@ -2638,6 +2644,58 @@ class XATBrowserAutomation:
         except Exception as e:
             logger.warning(f"⚠️ Falha ao instalar patch de Turnstile: {e}")
 
+    async def _get_element_coordinates(self, page: Page, selector: str) -> Optional[Tuple[int, int]]:
+        """
+        Obtém as coordenadas (x, y) do centro de um elemento na página.
+        Retorna None se o elemento não for encontrado ou não estiver visível.
+        """
+        try:
+            # Obter bounding box do elemento
+            bbox = await page.locator(selector).bounding_box()
+            if not bbox:
+                return None
+
+            # Calcular coordenadas do centro do elemento
+            center_x = int(bbox['x'] + bbox['width'] / 2)
+            center_y = int(bbox['y'] + bbox['height'] / 2)
+
+            logger.debug(f"📍 Coordenadas do elemento {selector}: ({center_x}, {center_y})")
+            return (center_x, center_y)
+
+        except Exception as e:
+            logger.warning(f"⚠️ Erro ao obter coordenadas do elemento {selector}: {e}")
+            return None
+
+    async def _click_element_with_mouse_coordinates(self, page: Page, selector: str) -> bool:
+        """
+        Clica em um elemento usando coordenadas do mouse em vez de page.click().
+        Isso simula um clique mais humano e pode ajudar com detecção anti-bot.
+        """
+        try:
+            # Obter coordenadas do elemento
+            coords = await self._get_element_coordinates(page, selector)
+            if not coords:
+                logger.warning(f"⚠️ Não foi possível obter coordenadas do elemento {selector}")
+                return False
+
+            x, y = coords
+
+            # Mover mouse para a posição (com movimento natural)
+            await page.mouse.move(x, y, steps=random.randint(5, 10))
+
+            # Pequena pausa antes do clique (simula reflexão humana)
+            await page.wait_for_timeout(random.randint(100, 300))
+
+            # Clicar com o mouse
+            await page.mouse.click(x, y, button='left', delay=random.randint(50, 150))
+
+            logger.info(f"🖱️ Clique executado via coordenadas do mouse em {selector} ({x}, {y})")
+            return True
+
+        except Exception as e:
+            logger.warning(f"⚠️ Erro ao clicar via coordenadas do mouse em {selector}: {e}")
+            return False
+
     async def _validate_sticky_ip(self, page: Page, proxy_inicial: Optional[str]) -> bool:
         """
         Valida que a sessão mantém o mesmo IP durante o registro (Sticky IP).
@@ -2836,16 +2894,23 @@ class XATBrowserAutomation:
                     button = page.locator(selector).first
                     if await button.count() > 0:
                         logger.info(f"✅ Botão de submit encontrado: {selector}")
-                        try:
-                            await button.click()
-                        except Exception as click_error:
-                            logger.warning(f"⚠️ Clique normal falhou para {selector}: {click_error}. Tentando JS .click()")
+                        # ⚠️ FEATURE: Usar coordenadas do mouse em vez de page.click()
+                        # Isso simula um clique mais humano e pode ajudar com detecção anti-bot
+                        if await self._click_element_with_mouse_coordinates(page, selector):
+                            logger.info(f"✅ Botão de submit clicado via coordenadas do mouse: {selector}")
+                        else:
+                            # Fallback para clique normal se coordenadas falharem
+                            logger.warning(f"⚠️ Clique via coordenadas falhou para {selector}, tentando clique normal...")
                             try:
-                                await page.evaluate(f'document.querySelector("{selector}")?.click()')
-                                logger.info(f"✅ Clique JS executado em {selector}")
-                            except Exception as js_click_error:
-                                logger.warning(f"⚠️ Clique JS falhou para {selector}: {js_click_error}")
-                                raise
+                                await button.click()
+                            except Exception as click_error:
+                                logger.warning(f"⚠️ Clique normal falhou para {selector}: {click_error}. Tentando JS .click()")
+                                try:
+                                    await page.evaluate(f'document.querySelector("{selector}")?.click()')
+                                    logger.info(f"✅ Clique JS executado em {selector}")
+                                except Exception as js_click_error:
+                                    logger.warning(f"⚠️ Clique JS falhou para {selector}: {js_click_error}")
+                                    raise
                         submit_found = True
                         break
                 except Exception as e:
@@ -2854,11 +2919,16 @@ class XATBrowserAutomation:
 
             if not submit_found:
                 logger.warning("⚠️ Botão de submit não foi encontrado")
-                # Último fallback: tentar clicar diretamente no link
+                # Último fallback: tentar clicar diretamente no link usando coordenadas
                 try:
-                    await page.click('a#butregister', force=True)
-                    logger.info("✅ Botão de submit clicado via fallback force=True")
-                    submit_found = True
+                    if await self._click_element_with_mouse_coordinates(page, 'a#butregister'):
+                        logger.info("✅ Botão de submit clicado via coordenadas do mouse (fallback)")
+                        submit_found = True
+                    else:
+                        logger.warning("⚠️ Fallback via coordenadas também falhou. Tentando page.click() force=True")
+                        await page.click('a#butregister', force=True)
+                        logger.info("✅ Botão de submit clicado via fallback force=True")
+                        submit_found = True
                 except Exception as e:
                     logger.warning(f"⚠️ Fallback do submit também falhou: {e}. Tentando JS .click() no link direto")
                     try:
@@ -3364,7 +3434,10 @@ class XATBrowserAutomation:
             return page_url
 
     def _resolver_recaptcha(self, sitekey: str, page_url: str, payload: Optional[Dict[str, str]] = None, proxies: Optional[Dict[str, str]] = None) -> Optional[str]:
-        """Resolve reCAPTCHA/Turnstile usando 2captcha."""
+        """
+        Resolve reCAPTCHA/Turnstile usando 2captcha com Proxy-On.
+        Passa as credenciais do proxy atual para que o captcha seja resolvido com o mesmo IP residencial.
+        """
         provider = self.config['captcha_solver'].get('provider', '2captcha')
         api_key = self.config['captcha_solver'].get('api_key', '')
         api_key = api_key.strip()
@@ -3381,12 +3454,37 @@ class XATBrowserAutomation:
             method = 'turnstile' if sitekey.startswith('0x') else 'userrecaptcha'
             normalized_pageurl = self._normalize_captcha_pageurl(page_url)
             logger.info(f"🔐 Enviando desafio reCAPTCHA/Turnstile para 2captcha (method={method}, sitekey={sitekey[:20]}..., pageurl={normalized_pageurl})")
+
             params = {
                 'key': api_key,
                 'method': method,
                 'pageurl': normalized_pageurl,
                 'json': 1
             }
+
+            # ⚠️ FEATURE: 2Captcha Proxy-On - Passar credenciais do proxy atual
+            # Para que o captcha seja resolvido com o mesmo IP residencial brasileiro
+            if self.current_proxy and '@' in self.current_proxy:
+                try:
+                    # Extrair credenciais do proxy atual (formato: user:pass@host:port)
+                    proxy_parts = self.current_proxy.replace('http://', '').replace('https://', '').replace('socks5://', '')
+                    if '@' in proxy_parts:
+                        creds, host_port = proxy_parts.rsplit('@', 1)
+                        if ':' in creds:
+                            username, password = creds.split(':', 1)
+                            # Adicionar proxy credentials aos parâmetros do 2Captcha
+                            params['proxy'] = f"{host_port}"
+                            params['proxytype'] = 'HTTP'  # Webshare usa HTTP proxy
+                            logger.info(f"🔒 2Captcha Proxy-On ativado: usando proxy {host_port} para resolver captcha")
+                        else:
+                            logger.warning("⚠️ Não foi possível extrair credenciais do proxy para 2Captcha Proxy-On")
+                    else:
+                        logger.warning("⚠️ Proxy atual não tem formato esperado para 2Captcha Proxy-On")
+                except Exception as proxy_error:
+                    logger.warning(f"⚠️ Erro ao configurar 2Captcha Proxy-On: {proxy_error}")
+            else:
+                logger.info("ℹ️ 2Captcha sem Proxy-On (proxy atual não disponível ou não autenticado)")
+
             if method == 'turnstile':
                 params['sitekey'] = sitekey.strip()
                 # Forçar action padrão para xat login se não houver action explícito
@@ -3401,10 +3499,10 @@ class XATBrowserAutomation:
 
                 # Log detalhado dos parâmetros sendo enviados
                 logger.info(f"🔍 Parâmetros 2Captcha: key=***, method={method}, sitekey={params['sitekey']}, pageurl={normalized_pageurl}")
+                if 'proxy' in params:
+                    logger.info(f"🔍 proxy={params['proxy']}, proxytype={params['proxytype']}")
                 if 'data[action]' in params:
                     logger.info(f"🔍 data[action]={params['data[action]']}")
-                if 'data' in params:
-                    logger.info(f"🔍 data={params['data']}")
             else:
                 params['googlekey'] = sitekey
                 if payload:
