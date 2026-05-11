@@ -1501,6 +1501,15 @@ class XATBrowserAutomation:
 
             while attempt < max_attempts:
                 self._choose_next_proxy(exclude_current=(attempt > 0))
+                
+                # Teste de IP/país antes de criar o contexto
+                if not self._test_proxy_ip_and_country(self.current_proxy):
+                    logger.warning(f"⚠️ Proxy {self.current_proxy} falhou no teste de IP/país, tentando próximo...")
+                    attempt += 1
+                    if attempt >= max_attempts:
+                        raise Exception("❌ Nenhum proxy passou no teste de IP/país")
+                    continue
+                
                 try:
                     await self._create_browser_context()
                     logger.info("✅ Navegador Playwright inicializado com stealth")
@@ -1543,7 +1552,7 @@ class XATBrowserAutomation:
         random.shuffle(options)  # Embaralhar para tentar diferentes proxies
 
         for proxy_candidate in options:
-            proxy_candidate = self._apply_brightdata_session(proxy_candidate)
+            # Nota: Webshare é um rotating endpoint, não precisa de sufixo de sessão
             if self._validate_proxy_connectivity(proxy_candidate):
                 self.current_proxy = proxy_candidate
                 proxy_display = self.current_proxy.replace('http://', '').replace('https://', '')
@@ -1646,6 +1655,59 @@ class XATBrowserAutomation:
             logger.warning(f"⚠️ Proxy {proxy_str} falhou na validação: {e}")
             return False
 
+    def _test_proxy_ip_and_country(self, proxy_str: str) -> bool:
+        """Testa se o proxy está funcionando e se o IP é brasileiro."""
+        try:
+            proxy_dict = self._build_proxy_dict(proxy_str)
+            if not proxy_dict:
+                return False
+
+            # Teste com ipify para obter IP
+            response = requests.get(
+                'https://api.ipify.org?format=json',
+                proxies=proxy_dict,
+                timeout=10,
+                verify=False,
+                headers={'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'}
+            )
+            if response.status_code != 200:
+                return False
+
+            try:
+                ip_data = response.json()
+                ip = ip_data.get('ip', 'Desconhecido')
+                logger.info(f"🌍 IP detectado via proxy: {ip}")
+                
+                # Teste com ip-api.com para obter país (limite: 45 requisições por minuto)
+                country_response = requests.get(
+                    f'http://ip-api.com/json/{ip}',
+                    timeout=10,
+                    verify=False,
+                    headers={'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'}
+                )
+                if country_response.status_code == 200:
+                    country_data = country_response.json()
+                    country = country_data.get('country', 'Desconhecido')
+                    country_code = country_data.get('countryCode', 'XX')
+                    logger.info(f"🗺️  País detectado: {country} ({country_code})")
+                    
+                    # Verificar se é Brasil
+                    if country_code == 'BR':
+                        logger.info(f"✅ IP brasileiro confirmado: {ip}")
+                        return True
+                    else:
+                        logger.warning(f"⚠️ IP não é brasileiro. País detectado: {country} ({country_code})")
+                        return False
+                else:
+                    logger.warning(f"⚠️ Não foi possível obter informações do país para {ip}")
+                    return True  # Mesmo sem confirmar país, proxy funciona
+            except Exception as e:
+                logger.warning(f"⚠️ Erro ao processar resposta de IP: {e}")
+                return True
+        except Exception as e:
+            logger.warning(f"⚠️ Proxy {proxy_str} falhou no teste de IP/país: {e}")
+            return False
+
     def _start_local_http_proxy(self, upstream_proxy: Dict[str, str]) -> Optional[Dict[str, str]]:
         """Inicia um proxy HTTP local que encaminha tráfego via SOCKS5 autenticado."""
         self._stop_local_http_proxy()
@@ -1676,30 +1738,31 @@ class XATBrowserAutomation:
             self.local_proxy_thread.join(timeout=2)
             self.local_proxy_thread = None
 
-    def _apply_brightdata_session(self, proxy_str: str) -> str:
-        """Aplica um sufixo de sessão aleatório em Bright Data para trocar IP sem trocar proxy."""
-        if not proxy_str:
-            return proxy_str
-
-        if not proxy_str.lower().startswith(('http://', 'https://', 'socks5://', 'socks4://')):
-            proxy_str = f'http://{proxy_str}'
-
-        try:
-            parsed = urlparse(proxy_str)
-            if not parsed.hostname or parsed.hostname.lower() != 'brd.superproxy.io':
-                return proxy_str
-
-            username = parsed.username or ''
-            password = parsed.password or ''
-            if username and '-session-' not in username:
-                suffix = f'-session-{random.randint(100000, 999999)}'
-                username = f'{username}{suffix}'
-
-            scheme = parsed.scheme or 'http'
-            return f"{scheme}://{username}:{password}@{parsed.hostname}:{parsed.port}"
-        except Exception as e:
-            logger.warning(f"⚠️ Erro ao aplicar sessão Bright Data no proxy {proxy_str}: {e}")
-            return proxy_str
+    # DESABILITADO: Função para Bright Data (agora usando Webshare Rotating Endpoint)
+    # def _apply_brightdata_session(self, proxy_str: str) -> str:
+    #     """Aplica um sufixo de sessão aleatório em Bright Data para trocar IP sem trocar proxy."""
+    #     if not proxy_str:
+    #         return proxy_str
+    #
+    #     if not proxy_str.lower().startswith(('http://', 'https://', 'socks5://', 'socks4://')):
+    #         proxy_str = f'http://{proxy_str}'
+    #
+    #     try:
+    #         parsed = urlparse(proxy_str)
+    #         if not parsed.hostname or parsed.hostname.lower() != 'brd.superproxy.io':
+    #             return proxy_str
+    #
+    #         username = parsed.username or ''
+    #         password = parsed.password or ''
+    #         if username and '-session-' not in username:
+    #             suffix = f'-session-{random.randint(100000, 999999)}'
+    #             username = f'{username}{suffix}'
+    #
+    #         scheme = parsed.scheme or 'http'
+    #         return f"{scheme}://{username}:{password}@{parsed.hostname}:{parsed.port}"
+    #     except Exception as e:
+    #         logger.warning(f"⚠️ Erro ao aplicar sessão Bright Data no proxy {proxy_str}: {e}")
+    #         return proxy_str
 
     async def _block_unnecessary_assets(self, route, request) -> None:
         """Bloqueia imagens e mídia para reduzir uso de banda e acelerar o cadastro."""
@@ -2033,8 +2096,8 @@ class XATBrowserAutomation:
         try:
             logger.info("🔗 Obtendo UserID/k2 via navegador")
 
-            # Acessar auser3.php
-            response = await page.goto(self.AUSER_URL, wait_until='networkidle')
+            # Acessar auser3.php (timeout aumentado para proxies residenciais)
+            response = await page.goto(self.AUSER_URL, wait_until='networkidle', timeout=45000)
             
             if response and response.status in [403, 503]:
                 logger.warning(f"⚠️ Bloqueio detectado ao acessar auser3.php: {response.status}")
@@ -2174,7 +2237,7 @@ class XATBrowserAutomation:
 
             login_url = f"{self.LOGIN_URL}?mode=1&UserId={user_id}&k2={k2_token}"
             await self._patch_turnstile_callbacks(page)
-            response = await page.goto(login_url, wait_until='networkidle')
+            response = await page.goto(login_url, wait_until='networkidle', timeout=45000)
 
             # Aguardar a página intersticial do Cloudflare sumir ("Checking your browser")
             logger.info("⏳ Aguardando 5s para página intersticial Cloudflare carregar/sumir...")
