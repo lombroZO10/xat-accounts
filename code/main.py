@@ -45,14 +45,16 @@ class Socks5HttpProxyHandler(BaseHTTPRequestHandler):
                 upstream['host'],
                 upstream['port'],
                 username=upstream.get('username'),
-                password=upstream.get('password')
+                password=upstream.get('password'),
+                rdns=True
             )
         elif proxy_scheme == 'socks4':
             sock.set_proxy(
                 socks.SOCKS4,
                 upstream['host'],
                 upstream['port'],
-                username=upstream.get('username')
+                username=upstream.get('username'),
+                rdns=True
             )
         else:
             sock = socket.create_connection((host, port), timeout=10)
@@ -1460,11 +1462,22 @@ class XATBrowserAutomation:
         self.last_login_block_reason: Optional[str] = None
         self.last_captcha_block_reason: Optional[str] = None
         self.user_agents = [
-            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/140.0.0.0 Safari/537.36",
-            "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:135.0) Gecko/20100101 Firefox/135.0",
-            "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/140.0.0.0 Safari/537.36",
-            "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/140.0.0.0 Safari/537.36",
-            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Edge/140.0.0.0"
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.6419.46 Safari/537.36",
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:139.0) Gecko/20100101 Firefox/139.0",
+            "Mozilla/5.0 (Macintosh; Intel Mac OS X 14_2_1) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.1 Safari/605.1.15",
+            "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.6490.102 Safari/537.36",
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Edge/126.0.2429.60",
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:137.0) Gecko/20100101 Firefox/137.0",
+            "Mozilla/5.0 (Macintosh; Intel Mac OS X 14_1) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.6480.88 Safari/537.36"
+        ]
+        self.screen_resolutions = [
+            {'width': 1366, 'height': 768},
+            {'width': 1440, 'height': 900},
+            {'width': 1536, 'height': 864},
+            {'width': 1600, 'height': 900},
+            {'width': 1920, 'height': 1080},
+            {'width': 1920, 'height': 1200},
+            {'width': 2560, 'height': 1440}
         ]
 
         if not PLAYWRIGHT_AVAILABLE:
@@ -1530,6 +1543,7 @@ class XATBrowserAutomation:
         random.shuffle(options)  # Embaralhar para tentar diferentes proxies
 
         for proxy_candidate in options:
+            proxy_candidate = self._apply_brightdata_session(proxy_candidate)
             if self._validate_proxy_connectivity(proxy_candidate):
                 self.current_proxy = proxy_candidate
                 proxy_display = self.current_proxy.replace('http://', '').replace('https://', '')
@@ -1656,6 +1670,34 @@ class XATBrowserAutomation:
             self.local_proxy_thread.join(timeout=2)
             self.local_proxy_thread = None
 
+    def _apply_brightdata_session(self, proxy_str: str) -> str:
+        """Aplica um sufixo de sessão aleatório em Bright Data para trocar IP sem trocar proxy."""
+        if not proxy_str:
+            return proxy_str
+
+        if not proxy_str.lower().startswith(('http://', 'https://', 'socks5://', 'socks4://')):
+            proxy_str = f'http://{proxy_str}'
+
+        parsed = urlparse(proxy_str)
+        if not parsed.hostname or parsed.hostname.lower() != 'brd.superproxy.io':
+            return proxy_str
+
+        username = parsed.username or ''
+        password = parsed.password or ''
+        if username and '-session-' not in username:
+            suffix = f'-session-{random.randint(100000, 999999)}'
+            username = f'{username}{suffix}'
+
+        scheme = parsed.scheme or 'http'
+        return f"{scheme}://{username}:{password}@{parsed.hostname}:{parsed.port}"
+
+    async def _block_unnecessary_assets(self, route, request) -> None:
+        """Bloqueia imagens e mídia para reduzir uso de banda e acelerar o cadastro."""
+        if request.resource_type in ['image', 'media', 'font', 'video']:
+            await route.abort()
+        else:
+            await route.continue_()
+
     async def _create_browser_context(self) -> None:
         """Cria ou recria o navegador/contexto Playwright com o proxy atual."""
         if self.context:
@@ -1676,7 +1718,10 @@ class XATBrowserAutomation:
             '--no-zygote',
             '--disable-gpu',
             '--disable-web-security',
-            '--disable-features=VizDisplayCompositor'
+            '--disable-features=VizDisplayCompositor',
+            '--disable-background-networking',
+            '--disable-client-side-phishing-detection',
+            '--disable-component-update'
         ]
 
         self.browser = await self.playwright.chromium.launch(
@@ -1686,8 +1731,9 @@ class XATBrowserAutomation:
 
         try:
             user_agent = random.choice(self.user_agents)
+            viewport = random.choice(self.screen_resolutions)
             self.context = await self.browser.new_context(
-                viewport={'width': 1920, 'height': 1080},
+                viewport=viewport,
                 device_scale_factor=1,
                 has_touch=False,
                 user_agent=user_agent,
@@ -1696,6 +1742,7 @@ class XATBrowserAutomation:
                 extra_http_headers=self._build_extra_http_headers(user_agent),
                 proxy=proxy_config
             )
+            await self.context.route('**/*', self._block_unnecessary_assets)
 
             stealth_config = Stealth(
                 webgl_vendor_override='Intel Inc.',
