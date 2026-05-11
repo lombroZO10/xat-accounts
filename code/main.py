@@ -1303,6 +1303,7 @@ class XATBrowserAutomation:
     BASE_URL = "https://xat.com"
     AUSER_URL = f"{BASE_URL}/web_gear/chat/auser3.php"
     LOGIN_URL = f"{BASE_URL}/login"
+    VALID_XAT_SITEKEYS = {"0x4AAAAAAA9W0lpWWjpGMSxN"}
 
     def __init__(self, config: Dict, proxies: List[str], bad_proxies: Optional[Set[str]] = None):
         self.config = config
@@ -1480,6 +1481,12 @@ class XATBrowserAutomation:
         except Exception as e:
             logger.warning(f"⚠️ Falha ao limpar identidade do contexto: {e}")
 
+    def _is_allowed_sitekey(self, sitekey: Optional[str]) -> bool:
+        """Valida se o sitekey pertence ao widget XAT Turnstile esperado."""
+        if not sitekey:
+            return False
+        return sitekey in self.VALID_XAT_SITEKEYS
+
     async def _rotate_proxy_and_recreate(self) -> bool:
         """Seleciona um novo proxy e recria o contexto do navegador."""
         if not self.proxies:
@@ -1570,6 +1577,7 @@ class XATBrowserAutomation:
             for attempt in range(max_proxy_retries):
                 try:
                     if attempt > 0:
+                        await self._clear_browser_context_identity()
                         logger.info("🔄 Obtendo novo UserID/k2 para nova tentativa de login")
                         new_user_data = await self._get_user_data(page)
                         if new_user_data and new_user_data.get('UserId'):
@@ -1634,6 +1642,17 @@ class XATBrowserAutomation:
                     return False
                 page = await self.context.new_page()
                 page.set_default_timeout(self.config['browser_automation'].get('page_timeout', 30000))
+                if attempt > 0:
+                    await self._clear_browser_context_identity()
+                    logger.info("🔄 Obtendo novo UserID/k2 para nova tentativa após erro de captcha")
+                    new_user_data = await self._get_user_data(page)
+                    if new_user_data and new_user_data.get('UserId'):
+                        user_id = new_user_data.get('UserId')
+                        if new_user_data.get('k2'):
+                            k2_token = new_user_data.get('k2')
+                        logger.info(f"✅ Novo UserID obtido após captcha fail: {user_id}")
+                    else:
+                        logger.warning("⚠️ Falha ao obter novo UserID/k2 após captcha fail; usando UserID anterior")
                 try:
                     login_success = await self._access_login_page(page, user_id, k2_token)
                     if not login_success:
@@ -1831,7 +1850,7 @@ class XATBrowserAutomation:
                 if not title or title.strip() == '':
                     logger.warning(f"⚠️ Página carregou com título vazio - provável bloqueio Cloudflare persistente")
                     self._blacklist_current_proxy("Página login com título vazio após Cloudflare bypass")
-                    raise Exception("Página de login carregou com título vazio - proxy bloqueado")
+                    raise CloudflareHardBlockException("Página de login carregou com título vazio - proxy bloqueado")
                 else:
                     logger.info(f"ℹ️ Página suspeita carregada: {title}. Tentando continuar...")
             # Dar um breve tempo para o DOM ser atualizado pelo JavaScript
@@ -1867,6 +1886,9 @@ class XATBrowserAutomation:
             # Extrair sitekey do widget presente na página
             sitekey = await self._extract_sitekey_from_page(page)
             if sitekey:
+                if not self._is_allowed_sitekey(sitekey):
+                    logger.warning(f"⚠️ Sitekey de Cloudflare challenge detectada e ignorada: {sitekey}")
+                    return False
                 logger.info(f"✅ Sitekey extraída do login via navegador: {sitekey}")
             elif blocked_status:
                 title_lower = title.lower() if title else ''
@@ -1924,9 +1946,13 @@ class XATBrowserAutomation:
 
             sitekey = await self._extract_sitekey_from_full_page_content(page)
             if sitekey:
-                logger.info(f"✅ Sitekey encontrada via regex/HTML antes do widget visível: {sitekey}")
-                # Se encontrou via HTML, não precisa esperar widget - envia imediatamente
-            else:
+                if not self._is_allowed_sitekey(sitekey):
+                    logger.warning(f"⚠️ Sitekey inválida detectada no HTML e ignorada: {sitekey}")
+                    sitekey = None
+                else:
+                    logger.info(f"✅ Sitekey encontrada via regex/HTML antes do widget visível: {sitekey}")
+                    # Se encontrou via HTML, não precisa esperar widget - envia imediatamente
+            if not sitekey:
                 logger.info(f"🔍 Sitekey não encontrada no HTML, aguardando widget visível por até {wait_timeout // 1000}s")
                 await page.wait_for_function(
                     """
@@ -1945,12 +1971,20 @@ class XATBrowserAutomation:
                 )
                 sitekey = await self._extract_sitekey_from_page(page)
                 if sitekey:
-                    logger.info("✅ Sitekey encontrada via DOM após widget visível")
+                    if sitekey and not self._is_allowed_sitekey(sitekey):
+                        logger.warning(f"⚠️ Sitekey inválida detectada no DOM e ignorada: {sitekey}")
+                        sitekey = None
+                    elif sitekey:
+                        logger.info("✅ Sitekey encontrada via DOM após widget visível")
                 else:
                     logger.info("🔍 Sitekey não encontrada via DOM; tentando HTML novamente")
                     sitekey = await self._extract_sitekey_from_full_page_content(page)
                     if sitekey:
-                        logger.info("✅ Sitekey encontrada no HTML após aguardar widget")
+                        if not self._is_allowed_sitekey(sitekey):
+                            logger.warning(f"⚠️ Sitekey inválida detectada no HTML após espera e ignorada: {sitekey}")
+                            sitekey = None
+                        else:
+                            logger.info("✅ Sitekey encontrada no HTML após aguardar widget")
 
             if not sitekey:
                 # Só verifica bloqueio se não encontrou captcha na página
@@ -2582,6 +2616,9 @@ class XATBrowserAutomation:
                 }
                 """
             )
+            if sitekey and not self._is_allowed_sitekey(sitekey):
+                logger.warning(f"⚠️ Sitekey de DOM não permitida detectada e ignorada: {sitekey}")
+                return None
             return sitekey
         except Exception as e:
             logger.warning(f"⚠️ Erro ao extrair sitekey do DOM: {e}")
@@ -2605,7 +2642,10 @@ class XATBrowserAutomation:
             for pattern in patterns:
                 match = re.search(pattern, html_content)
                 if match:
-                    return match.group(1)
+                    sitekey = match.group(1)
+                    if self._is_allowed_sitekey(sitekey):
+                        return sitekey
+                    logger.warning(f"⚠️ Sitekey HTML não permitida detectada e ignorada: {sitekey}")
             return None
         except Exception as e:
             logger.warning(f"⚠️ Erro ao extrair sitekey do HTML: {e}")
