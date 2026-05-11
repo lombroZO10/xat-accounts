@@ -1574,6 +1574,27 @@ class XATBrowserAutomation:
 
         return proxy_config
 
+    def _build_proxy_dict(self, proxy_str: str) -> Optional[Dict[str, str]]:
+        """Constrói um dicionário de proxy compatível com requests."""
+        if not proxy_str:
+            return None
+
+        proxy_str = proxy_str.strip().rstrip('/')
+        if proxy_str.lower().startswith(('http://', 'https://', 'socks5://', 'socks4://')):
+            proxy_url = proxy_str
+        elif '@' in proxy_str and proxy_str.count(':') == 3:
+            ip, porta, user, password = proxy_str.split(':', 3)
+            proxy_url = f"http://{user}:{password}@{ip}:{porta}"
+        elif ':' in proxy_str:
+            proxy_url = f"http://{proxy_str}"
+        else:
+            return None
+
+        return {
+            'http': proxy_url,
+            'https': proxy_url
+        }
+
     def _validate_proxy_connectivity(self, proxy_str: str) -> bool:
         """Valida se o proxy responde a uma requisição rápida antes de abrir o navegador."""
         try:
