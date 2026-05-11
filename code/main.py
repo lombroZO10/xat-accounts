@@ -1376,6 +1376,7 @@ class XATBrowserAutomation:
             tor_proxy = "socks5://127.0.0.1:9050"
             self.current_proxy = tor_proxy
             logger.info(f"🌐 Usando Tor como proxy fallback: {tor_proxy}")
+            logger.warning("⚠️ Proxy Tor em uso: este IP é mais frágil para o fluxo de registro e deve ser trocado assim que possível.")
             return tor_proxy
 
         options = [p for p in self.proxies if p != self.current_proxy] if exclude_current else list(self.proxies)
@@ -1388,6 +1389,8 @@ class XATBrowserAutomation:
         if '@' in proxy_display:
             proxy_display = proxy_display.split('@', 1)[1]
         logger.info(f"🌐 Proxy selecionado: {proxy_display}")
+        if self.current_proxy.startswith('socks5://') or '198.23.239' in self.current_proxy:
+            logger.warning("⚠️ Proxy Tor detectado: use com cautela e rotacione se a página não carregar rápido.")
         return self.current_proxy
 
     def _set_current_proxy(self, proxy: Optional[str]) -> None:
@@ -1886,10 +1889,8 @@ class XATBrowserAutomation:
                     # Failsafe: se título continua vazio após intersticial, é bloqueio hard
                     if not title or title.strip() == '':
                         logger.warning("🚫 Cloudflare Hard Block detectado - título permanece vazio após 15s")
-                        raise CloudflareHardBlockException("Página intersticial Cloudflare resultou em bloqueio hard - proxy precisa ser rotacionado")
-                except CloudflareHardBlockException:
-                    # Re-lançar para que o loop de retry capture e rotacione proxy
-                    raise
+                        self._blacklist_current_proxy("Página login com título vazio após Cloudflare bypass")
+                        return False
                 except Exception as e:
                     logger.warning(f"⚠️ Timeout aguardando página após Cloudflare: {e}")
                     self._blacklist_current_proxy(f"Página intersticial Cloudflare não carregou ou título vazio: {e}")
@@ -1902,7 +1903,7 @@ class XATBrowserAutomation:
                 if not title or title.strip() == '':
                     logger.warning(f"⚠️ Página carregou com título vazio - provável bloqueio Cloudflare persistente")
                     self._blacklist_current_proxy("Página login com título vazio após Cloudflare bypass")
-                    raise CloudflareHardBlockException("Página de login carregou com título vazio - proxy bloqueado")
+                    return False
                 else:
                     logger.info(f"ℹ️ Página suspeita carregada: {title}. Tentando continuar...")
             # Dar um breve tempo para o DOM ser atualizado pelo JavaScript
@@ -1991,8 +1992,8 @@ class XATBrowserAutomation:
             logger.info("🔒 Aguardando carregamento do widget de captcha...")
             await self._simulate_human_interaction(page)
 
-            captcha_timeout = max(self.config['browser_automation'].get('captcha_timeout', 60), 60)
-            wait_timeout = min(captcha_timeout * 1000, 90000)  # Até 90s para widgets lentos de Turnstile
+            captcha_timeout = max(self.config['browser_automation'].get('captcha_timeout', 15), 15)
+            wait_timeout = min(captcha_timeout * 1000, 15000)  # Até 15s para widgets de Turnstile
 
             await page.wait_for_load_state('networkidle', timeout=wait_timeout)
 
@@ -2006,21 +2007,28 @@ class XATBrowserAutomation:
                     # Se encontrou via HTML, não precisa esperar widget - envia imediatamente
             if not sitekey:
                 logger.info(f"🔍 Sitekey não encontrada no HTML, aguardando widget visível por até {wait_timeout // 1000}s")
-                await page.wait_for_function(
-                    """
-                    () => {
-                        return document.querySelector('[data-sitekey]')
-                            || document.querySelector('.cf-turnstile')
-                            || document.querySelector('.g-recaptcha')
-                            || document.querySelector('iframe[src*="turnstile"]')
-                            || document.querySelector('iframe[src*="captcha"]')
-                            || window.__cf_turnstile_config
-                            || window.turnstile;
-                    }
-                    """,
-                    timeout=wait_timeout,
-                    polling=1000
-                )
+                try:
+                    await page.wait_for_function(
+                        """
+                        () => {
+                            return document.querySelector('[data-sitekey]')
+                                || document.querySelector('.cf-turnstile')
+                                || document.querySelector('.g-recaptcha')
+                                || document.querySelector('iframe[src*="turnstile"]')
+                                || document.querySelector('iframe[src*="captcha"]')
+                                || window.__cf_turnstile_config
+                                || window.turnstile;
+                        }
+                        """,
+                        timeout=wait_timeout,
+                        polling=1000
+                    )
+                except Exception as e:
+                    reason = f"Turnstile não carregou em {wait_timeout // 1000}s: {e}"
+                    logger.warning(f"⚠️ {reason}")
+                    self.last_captcha_block_reason = reason
+                    self._blacklist_current_proxy(reason)
+                    return False
                 sitekey = await self._extract_sitekey_from_page(page)
                 if sitekey:
                     if sitekey and not self._is_allowed_sitekey(sitekey):
