@@ -1480,7 +1480,7 @@ class XATBrowserAutomation:
         try:
             logger.info("🔄 Resetando serviço Tor...")
             os.system('sudo systemctl restart tor')
-            await asyncio.sleep(2)  # Wait for Tor to restart
+            time.sleep(15)  # Wait 15 seconds for Tor circuit to be ready
             logger.info("✅ Tor resetado com sucesso")
         except Exception as e:
             logger.debug(f"⚠️ Não foi possível resetar Tor (pode não estar instalado): {e}")
