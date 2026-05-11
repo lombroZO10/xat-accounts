@@ -14,11 +14,147 @@ import requests
 import importlib.util
 import asyncio
 import html
+import socket
+import select
+import threading
+import socks
 from datetime import datetime
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import List, Dict, Optional, Tuple, Set
-from urllib.parse import urljoin, parse_qs, urlencode, urlparse
+from urllib.parse import urljoin, parse_qs, urlencode, urlparse, urlsplit
 from bs4 import BeautifulSoup
+
+class ThreadedHTTPServer(ThreadingHTTPServer):
+    allow_reuse_address = True
+
+class Socks5HttpProxyHandler(BaseHTTPRequestHandler):
+    server_version = "XATProxy/0.1"
+
+    def log_message(self, format: str, *args) -> None:
+        return
+
+    def _connect_to_destination(self, host: str, port: int) -> socket.socket:
+        upstream = self.server.upstream_proxy
+        sock = socks.socksocket()
+        proxy_scheme = upstream.get('scheme', 'socks5').lower()
+
+        if proxy_scheme == 'socks5':
+            sock.set_proxy(
+                socks.SOCKS5,
+                upstream['host'],
+                upstream['port'],
+                username=upstream.get('username'),
+                password=upstream.get('password')
+            )
+        elif proxy_scheme == 'socks4':
+            sock.set_proxy(
+                socks.SOCKS4,
+                upstream['host'],
+                upstream['port'],
+                username=upstream.get('username')
+            )
+        else:
+            sock = socket.create_connection((host, port), timeout=10)
+            return sock
+
+        sock.settimeout(15)
+        sock.connect((host, port))
+        return sock
+
+    def _relay_data(self, client: socket.socket, remote: socket.socket) -> None:
+        sockets = [client, remote]
+        while True:
+            readable, _, _ = select.select(sockets, [], [], 10)
+            if not readable:
+                break
+
+            for s in readable:
+                data = s.recv(8192)
+                if not data:
+                    return
+                if s is client:
+                    remote.sendall(data)
+                else:
+                    client.sendall(data)
+
+    def do_CONNECT(self) -> None:
+        host, port = self.path.split(':', 1)
+        port = int(port)
+
+        try:
+            remote_socket = self._connect_to_destination(host, port)
+        except Exception as e:
+            self.send_error(502, f"Bad gateway: {e}")
+            return
+
+        self.send_response(200, 'Connection Established')
+        self.send_header('Proxy-agent', self.server_version)
+        self.end_headers()
+
+        self._relay_data(self.connection, remote_socket)
+
+    def _proxy_request(self) -> None:
+        url = self.path
+        if not url.startswith('http://') and not url.startswith('https://'):
+            host = self.headers.get('Host')
+            if not host:
+                self.send_error(400, 'Host header missing')
+                return
+            url = f'http://{host}{self.path}'
+
+        parsed = urlsplit(url)
+        dest_host = parsed.hostname
+        dest_port = parsed.port or (443 if parsed.scheme == 'https' else 80)
+
+        try:
+            remote_socket = self._connect_to_destination(dest_host, dest_port)
+        except Exception as e:
+            self.send_error(502, f'Bad gateway: {e}')
+            return
+
+        request_line = f"{self.command} {parsed.path or '/'}"
+        if parsed.query:
+            request_line += f'?{parsed.query}'
+        request_line += ' HTTP/1.1\r\n'
+
+        self.headers['Connection'] = 'close'
+        if 'Proxy-Connection' in self.headers:
+            del self.headers['Proxy-Connection']
+        if 'Proxy-Authorization' in self.headers:
+            del self.headers['Proxy-Authorization']
+
+        header_lines = ''.join(f"{k}: {v}\r\n" for k, v in self.headers.items())
+        remote_socket.sendall(request_line.encode('utf-8') + header_lines.encode('utf-8') + b"\r\n")
+
+        content_length = int(self.headers.get('Content-Length', 0))
+        if content_length:
+            body = self.rfile.read(content_length)
+            if body:
+                remote_socket.sendall(body)
+
+        self._relay_data(self.connection, remote_socket)
+
+    def do_GET(self) -> None:
+        self._proxy_request()
+
+    def do_POST(self) -> None:
+        self._proxy_request()
+
+    def do_PUT(self) -> None:
+        self._proxy_request()
+
+    def do_DELETE(self) -> None:
+        self._proxy_request()
+
+    def do_HEAD(self) -> None:
+        self._proxy_request()
+
+    def do_OPTIONS(self) -> None:
+        self._proxy_request()
+
+    def do_PATCH(self) -> None:
+        self._proxy_request()
 
 # Custom exceptions
 class CloudflareHardBlockException(Exception):
@@ -1319,6 +1455,8 @@ class XATBrowserAutomation:
         self.browser = None
         self.context = None
         self.current_proxy = None
+        self.local_proxy_server = None
+        self.local_proxy_thread = None
         self.last_login_block_reason: Optional[str] = None
         self.last_captcha_block_reason: Optional[str] = None
         self.user_agents = [
@@ -1362,6 +1500,7 @@ class XATBrowserAutomation:
                 await self.browser.close()
             if self.playwright:
                 await self.playwright.stop()
+            self._stop_local_http_proxy()
             logger.info("🧹 Recursos do navegador liberados")
         except Exception as e:
             logger.warning(f"⚠️ Erro ao limpar recursos: {e}")
@@ -1407,6 +1546,16 @@ class XATBrowserAutomation:
         if not parsed.hostname or not parsed.port:
             return None
 
+        if parsed.scheme.lower() == 'socks5' and parsed.username and parsed.password:
+            upstream = {
+                'scheme': 'socks5',
+                'host': parsed.hostname,
+                'port': parsed.port,
+                'username': parsed.username,
+                'password': parsed.password
+            }
+            return self._start_local_http_proxy(upstream)
+
         proxy_config: Dict[str, str] = {
             'server': f'{parsed.scheme}://{parsed.hostname}:{parsed.port}'
         }
@@ -1415,6 +1564,36 @@ class XATBrowserAutomation:
             proxy_config['password'] = parsed.password
 
         return proxy_config
+
+    def _start_local_http_proxy(self, upstream_proxy: Dict[str, str]) -> Optional[Dict[str, str]]:
+        """Inicia um proxy HTTP local que encaminha tráfego via SOCKS5 autenticado."""
+        self._stop_local_http_proxy()
+
+        server = ThreadedHTTPServer(('127.0.0.1', 0), Socks5HttpProxyHandler)
+        server.upstream_proxy = upstream_proxy
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+
+        self.local_proxy_server = server
+        self.local_proxy_thread = thread
+        logger.info(f"🔁 Proxy local iniciado em http://127.0.0.1:{server.server_port} para SOCKS5 autenticado")
+
+        return {'server': f'http://127.0.0.1:{server.server_port}'}
+
+    def _stop_local_http_proxy(self) -> None:
+        """Para o proxy HTTP local, se estiver ativo."""
+        if self.local_proxy_server:
+            try:
+                self.local_proxy_server.shutdown()
+                self.local_proxy_server.server_close()
+            except Exception as e:
+                logger.warning(f"⚠️ Falha ao desligar proxy local: {e}")
+            finally:
+                self.local_proxy_server = None
+
+        if self.local_proxy_thread:
+            self.local_proxy_thread.join(timeout=2)
+            self.local_proxy_thread = None
 
     async def _create_browser_context(self) -> None:
         """Cria ou recria o navegador/contexto Playwright com o proxy atual."""
@@ -1425,6 +1604,7 @@ class XATBrowserAutomation:
             await self.browser.close()
             self.browser = None
 
+        self._stop_local_http_proxy()
         proxy_config = self._build_proxy_settings(self.current_proxy)
         browser_args = [
             '--no-sandbox',
