@@ -2296,29 +2296,7 @@ class XATBrowserAutomation:
 
             await page.wait_for_timeout(1500)
 
-            try:
-                await page.click('.cf-turnstile', force=True)
-                logger.info("✅ Clique forçado no widget Turnstile antes da injeção")
-            except Exception:
-                pass
-
-            try:
-                await page.click('[data-sitekey]', force=True)
-                logger.info("✅ Clique forçado no elemento de sitekey antes da injeção")
-            except Exception:
-                pass
-
-            try:
-                widget = page.locator('.cf-turnstile').first
-                if await widget.count() > 0:
-                    box = await widget.bounding_box()
-                    if box:
-                        await page.mouse.click(box['x'] + box['width'] / 2, box['y'] + box['height'] / 2, force=True)
-                        logger.info("✅ Clique físico no centro do widget Turnstile antes da injeção")
-            except Exception as e:
-                logger.debug(f"⚠️ Falha no clique físico do widget Turnstile: {e}")
-
-            # Garantir que token de captcha está injetado
+            # Não clicar mais no widget do Turnstile. Injetar token e seguir direto para o submit.
             await self._inject_captcha_token_if_missing(page)
             logger.info("⏳ Aguardando 1s para o Cloudflare processar o token injetado antes de enviar o registro...")
             await page.wait_for_timeout(1000)
