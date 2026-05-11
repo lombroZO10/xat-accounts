@@ -1684,7 +1684,47 @@ class XATBrowserAutomation:
             proxy=proxy_config
         )
 
-        stealth_config = Stealth()
+        stealth_config = Stealth(
+            config={
+                'webgl_vendor': 'Intel Inc.',
+                'webgl_renderer': 'Intel(R) Iris(TM) Graphics 6100',
+                'navigator_vendor': 'Google Inc.',
+                'navigator_platform': 'Win32',
+                'navigator_languages': ['pt-BR', 'pt', 'en-US', 'en'],
+                'navigator_user_agent': random.choice(self.user_agents),
+                'webgl_extensions': [
+                    'ANGLE_instanced_arrays',
+                    'EXT_blend_minmax',
+                    'EXT_color_buffer_half_float',
+                    'EXT_disjoint_timer_query',
+                    'EXT_float_blend',
+                    'EXT_frag_depth',
+                    'EXT_shader_texture_lod',
+                    'EXT_texture_compression_bptc',
+                    'EXT_texture_compression_rgtc',
+                    'EXT_texture_filter_anisotropic',
+                    'EXT_sRGB',
+                    'KHR_parallel_shader_compile',
+                    'OES_element_index_uint',
+                    'OES_fbo_render_mipmap',
+                    'OES_standard_derivatives',
+                    'OES_texture_float',
+                    'OES_texture_float_linear',
+                    'OES_texture_half_float',
+                    'OES_texture_half_float_linear',
+                    'OES_vertex_array_object',
+                    'WEBGL_color_buffer_float',
+                    'WEBGL_compressed_texture_s3tc',
+                    'WEBGL_compressed_texture_s3tc_srgb',
+                    'WEBGL_debug_renderer_info',
+                    'WEBGL_debug_shaders',
+                    'WEBGL_depth_texture',
+                    'WEBGL_draw_buffers',
+                    'WEBGL_lose_context',
+                    'WEBGL_multi_draw'
+                ]
+            }
+        )
         await stealth_config.apply_stealth_async(self.context)
 
     async def _clear_browser_context_identity(self) -> None:
@@ -2086,6 +2126,8 @@ class XATBrowserAutomation:
             
             if 'login' in title.lower() or 'xat' in title.lower():
                 logger.info("✅ Página de login carregada com sucesso")
+                # Movimento de mouse aleatório para simular comportamento humano
+                await self._simulate_mouse_movement(page)
             else:
                 # Se título vazio/suspeito mesmo após aguardar Cloudflare, é bloqueio persistente
                 if not title or title.strip() == '':
@@ -2280,6 +2322,32 @@ class XATBrowserAutomation:
             await page.wait_for_timeout(200)
         except Exception as e:
             logger.debug(f"⚠️ Falha ao simular interação humana: {e}")
+
+    async def _simulate_mouse_movement(self, page: Page) -> None:
+        """Simula movimento de mouse aleatório para despertar o Turnstile."""
+        try:
+            logger.info("🐭 Simulando movimento de mouse aleatório para despertar Turnstile...")
+            # Movimento aleatório por 2-3 segundos
+            duration = random.randint(2000, 3000)
+            start_time = asyncio.get_event_loop().time()
+            
+            while (asyncio.get_event_loop().time() - start_time) < (duration / 1000):
+                # Movimento para posição aleatória na tela
+                x = random.randint(50, 1800)
+                y = random.randint(50, 900)
+                steps = random.randint(5, 15)
+                await page.mouse.move(x, y, steps=steps)
+                await page.wait_for_timeout(random.randint(100, 300))
+                
+                # Ocasionalmente scroll
+                if random.random() < 0.3:
+                    delta_y = random.randint(-200, 200)
+                    await page.mouse.wheel(0, delta_y)
+                    await page.wait_for_timeout(random.randint(200, 500))
+            
+            logger.info("✅ Movimento de mouse concluído")
+        except Exception as e:
+            logger.debug(f"⚠️ Falha ao simular movimento de mouse: {e}")
 
     async def _patch_turnstile_callbacks(self, page: Page) -> None:
         """Instala um patch no Turnstile para capturar callbacks e aceitar token injetado."""
