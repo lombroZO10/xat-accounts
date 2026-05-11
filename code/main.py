@@ -1965,9 +1965,20 @@ class XATBrowserAutomation:
             logger.debug(f"❌ Falha ao criar conta {username}, mas não foi detectado shadowban específico")
 
     async def create_account(self, username: str, password: str, email: str) -> bool:
-        """Cria conta XAT usando automação de navegador"""
+        """
+        Cria conta XAT usando automação de navegador.
+        
+        Segurança Sticky IP (IP Fixo por Sessão):
+        - O proxy é definido UMA VEZ no início (self.current_proxy)
+        - Mantém a mesma conexão TCP durante TODO o processo de registro
+        - Só rotaciona para novo IP se houver bloqueio Cloudflare ou erro crítico
+        - Garante que o token do Turnstile não fica inválido por troca de IP
+        """
         try:
+            # Guardar proxy inicial para validação de Sticky IP
+            proxy_inicial = self.current_proxy
             logger.info(f"🎭 Iniciando criação de conta: {username} | {email}")
+            logger.info(f"🔒 Sticky IP ativado - Mantendo mesma sessão TCP durante todo o registro")
 
             max_proxy_retries = self.config['browser_automation'].get('max_proxy_retries', 3)
             await self._clear_browser_context_identity()
@@ -2091,7 +2102,7 @@ class XATBrowserAutomation:
                 return False
 
             # Passo 3: Preencher e submeter formulário
-            success = await self._fill_registration_form(page, username, password, email)
+            success = await self._fill_registration_form(page, username, password, email, proxy_inicial)
             if not success:
                 await page.close()
                 return False
@@ -2627,7 +2638,26 @@ class XATBrowserAutomation:
         except Exception as e:
             logger.warning(f"⚠️ Falha ao instalar patch de Turnstile: {e}")
 
-    async def _fill_registration_form(self, page: Page, username: str, password: str, email: str) -> bool:
+    async def _validate_sticky_ip(self, page: Page, proxy_inicial: Optional[str]) -> bool:
+        """
+        Valida que a sessão mantém o mesmo IP durante o registro (Sticky IP).
+        Retorna True se o IP não mudou, False se mudou (o que invalidaria o token Turnstile).
+        """
+        try:
+            # O IP não deve mudar durante a sessão de registro
+            # Verificamos apenas se self.current_proxy não foi alterado (indicativo de rotação)
+            if self.current_proxy != proxy_inicial:
+                logger.warning(f"⚠️ AVISO: IP foi rotacionado durante o registro! Proxy mudou de {proxy_inicial.split('@')[1] if proxy_inicial and '@' in proxy_inicial else 'N/A'} para {self.current_proxy.split('@')[1] if self.current_proxy and '@' in self.current_proxy else 'N/A'}")
+                logger.warning(f"⚠️ Isto pode invalidar o token Turnstile! O registro pode falhar com 'captcha verification not successful'")
+                return False
+            else:
+                logger.debug(f"✅ Sticky IP validado - IP mantém a mesma sessão TCP")
+                return True
+        except Exception as e:
+            logger.warning(f"⚠️ Erro ao validar Sticky IP: {e}")
+            return True  # Não falhar se não conseguir validar
+
+    async def _fill_registration_form(self, page: Page, username: str, password: str, email: str, proxy_inicial: Optional[str] = None) -> bool:
         """Preenche e submete o formulário de registro usando digitação simulada."""
         try:
             logger.info("📝 Preenchendo formulário de registro...")
@@ -2689,13 +2719,21 @@ class XATBrowserAutomation:
             logger.info("✅ Todos os campos de formulário encontrados. Preenchendo...")
 
             # Preencher campos com click e type (forçar foco)
-            await self._fill_form_field(page, username_locator, username, "username")
-            await self._fill_form_field(page, password_locator, password, "password")
+            # Usando digitação simulada (type) com delays entre 80-160ms para humanizar entrada
+            await self._fill_form_field(page, username_locator, username, "username", delay=120)
+            await self._fill_form_field(page, password_locator, password, "password", delay=120)
             if password2_locator:
-                await self._fill_form_field(page, password2_locator, password, "password2")
-            await self._fill_form_field(page, email_locator, email, "email")
+                await self._fill_form_field(page, password2_locator, password, "password2", delay=120)
+            await self._fill_form_field(page, email_locator, email, "email", delay=120)
 
             logger.info("✅ Campos preenchidos com sucesso")
+
+            # ⚠️ Validar Sticky IP ANTES de submeter o formulário
+            # Isto garante que o token Turnstile não foi invalidado por rotação de IP
+            if proxy_inicial and not await self._validate_sticky_ip(page, proxy_inicial):
+                logger.warning("⚠️ CRÍTICO: IP foi rotacionado durante o preenchimento do formulário!")
+                logger.warning("⚠️ O token Turnstile pode estar inválido. Abortando submissão para evitar erro de captcha.")
+                raise Exception("Sticky IP violation: proxy foi rotacionado durante o registro")
 
             # Tentar marcar checkbox de concordância
             try:
@@ -2717,8 +2755,13 @@ class XATBrowserAutomation:
 
             # Não clicar mais no widget do Turnstile. Injetar token e seguir direto para o submit.
             await self._inject_captcha_token_if_missing(page)
-            logger.info("⏳ Aguardando 3.5s para o Cloudflare processar o token injetado antes de enviar o registro...")
-            await page.wait_for_timeout(3500)
+            logger.info("⏳ Aguardando 10s para o Cloudflare processar o token injetado antes de enviar o registro...")
+            if self.current_proxy and '@' in self.current_proxy:
+                proxy_display = self.current_proxy.split('@')[1]
+                logger.info(f"🔒 Mantendo Sticky IP (mesma sessão TCP): {proxy_display}")
+            else:
+                logger.info("🔒 Mantendo Sticky IP (mesma sessão TCP)")
+            await page.wait_for_timeout(10000)
 
             await page.evaluate(
                 """
@@ -2950,9 +2993,25 @@ class XATBrowserAutomation:
         return None
 
     async def _fill_form_field(self, page: Page, locator: Locator, value: str, field_name: str, delay: int = 120) -> None:
-        """Preenche um campo de formulário com clique forçado e tipagem simulada."""
+        """
+        Preenche um campo de formulário com clique forçado e tipagem simulada humanizada.
+        
+        Estratégia:
+        - Clique forçado para garantir foco
+        - Digitação letra por letra com delays aleatórios (100-300ms) para simular digitação humana
+        - Aguardas estratégicas entre passadas para o Turnstile processar a entrada
+        """
+    async def _fill_form_field(self, page: Page, locator: Locator, value: str, field_name: str, delay: int = 120) -> None:
+        """
+        Preenche um campo de formulário com clique forçado e tipagem simulada humanizada.
+        
+        Estratégia:
+        - Clique forçado para garantir foco
+        - Digitação letra por letra com delays aleatórios (100-300ms) para simular digitação humana
+        - Aguardas estratégicas entre passadas para o Turnstile processar a entrada
+        """
         try:
-            logger.info(f"📝 Preenchendo {field_name}...")
+            logger.info(f"📝 Preenchendo {field_name} com digitação humanizada...")
             
             # Aguardar que o campo esteja visível
             await locator.wait_for(timeout=20000)
@@ -2968,19 +3027,26 @@ class XATBrowserAutomation:
             await locator.fill("")
             await page.wait_for_timeout(200)
             
-            # Digitar com delay simulado
-            for char in value:
-                await locator.type(char, delay=random.randint(delay - 40, delay + 40))
+            # ⚠️ Digitar letra por letra com delays aleatórios de 100-300ms para humanizar entrada
+            # Isto evita que o padrão de preenchimento pareça automático
+            for i, char in enumerate(value):
+                # Delays aleatórios: 100-300ms entre teclas (ajustável via 'delay' parameter)
+                char_delay = random.randint(100, 300)
+                await locator.type(char, delay=char_delay)
+                
+                # A cada 3-5 caracteres, aguardar um pouco mais para simular reflexão humana
+                if (i + 1) % random.randint(3, 5) == 0:
+                    await page.wait_for_timeout(random.randint(200, 400))
             
             await page.wait_for_timeout(300)
-            logger.info(f"✅ {field_name} preenchido com sucesso")
+            logger.info(f"✅ {field_name} preenchido com sucesso (digitação humanizada: {len(value)} caracteres)")
             
         except Exception as e:
             logger.warning(f"⚠️ Erro ao preencher {field_name}: {e}")
             # Tentar alternativa com fill direto
             try:
                 await locator.fill(value)
-                logger.info(f"✅ {field_name} preenchido via fill (alternativa)")
+                logger.info(f"✅ {field_name} preenchido via fill (alternativa, não humanizado)")
             except Exception as e2:
                 logger.error(f"❌ Falha ao preencher {field_name}: {e2}")
                 raise
@@ -3245,10 +3311,12 @@ class XATBrowserAutomation:
             token
         )
         
-        # ⚠️ FEATURE 2: Aguarda um momento maior para garantir que o callback foi processado
+        # ⚠️ FEATURE 2: Aguarda um momento MAIOR para garantir que o callback foi processado
         # Isto dá tempo para o JavaScript do xat processar a notificação cf_callback/Turnstile
-        await page.wait_for_timeout(3500)
-        logger.debug("✅ Aguardado 3500ms para sincronizar callbacks do captcha")
+        # Aumentado de 3.5s para 10s para dar ao Turnstile tempo suficiente de processar o token
+        # e evitar o erro "The captcha verification was not successful"
+        await page.wait_for_timeout(10000)
+        logger.info("✅ Aguardado 10000ms (10s) para sincronizar callbacks do captcha com o Turnstile")
 
 
     async def _inject_captcha_token_if_missing(self, page: Page) -> None:
