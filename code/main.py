@@ -1759,6 +1759,7 @@ class XATBrowserAutomation:
             logger.info(f"🔗 Acessando página de login com UserId: {user_id}")
 
             login_url = f"{self.LOGIN_URL}?mode=1&UserId={user_id}&k2={k2_token}"
+            await self._patch_turnstile_callbacks(page)
             response = await page.goto(login_url, wait_until='networkidle')
 
             if response and response.status in [403, 503]:
@@ -1895,6 +1896,121 @@ class XATBrowserAutomation:
         except Exception as e:
             logger.debug(f"⚠️ Falha ao simular interação humana: {e}")
 
+    async def _patch_turnstile_callbacks(self, page: Page) -> None:
+        """Instala um patch no Turnstile para capturar callbacks e aceitar token injetado."""
+        try:
+            await page.add_init_script(
+                source="""
+                () => {
+                    const setupTurnstileInterceptor = () => {
+                        if (window.turnstile && typeof window.turnstile === 'object') {
+                            const originalTurnstile = window.turnstile;
+                            const patched = { ...originalTurnstile };
+                            if (typeof originalTurnstile.render === 'function') {
+                                patched.render = function(...args) {
+                                    if (args.length > 0 && typeof args[0] === 'object') {
+                                        const options = args[0];
+                                        if (typeof options.callback === 'function') {
+                                            window.__playwright_turnstile_callback = options.callback;
+                                        }
+                                        if (typeof options['data-callback'] === 'function') {
+                                            window.__playwright_turnstile_callback = options['data-callback'];
+                                        }
+                                    }
+                                    return originalTurnstile.render.apply(this, args);
+                                };
+                            }
+                            if (typeof originalTurnstile.ready === 'function') {
+                                patched.ready = function(cb) {
+                                    if (typeof cb === 'function') {
+                                        window.__playwright_turnstile_ready_callback = cb;
+                                    }
+                                    return originalTurnstile.ready.apply(this, [cb]);
+                                };
+                            }
+                            Object.defineProperty(window, 'turnstile', {
+                                configurable: true,
+                                enumerable: true,
+                                writable: true,
+                                value: patched
+                            });
+                        }
+                    };
+
+                    Object.defineProperty(window, '__playwright_dispatch_turnstile_token', {
+                        configurable: true,
+                        enumerable: true,
+                        writable: true,
+                        value: (token) => {
+                            try {
+                                window.cf_token = token;
+                                window.turnstileToken = token;
+                                window.grecaptchaResponse = token;
+                                window.recaptchaResponse = token;
+                                window.xatCaptchaToken = token;
+                                if (typeof window.__playwright_turnstile_callback === 'function') {
+                                    window.__playwright_turnstile_callback(token);
+                                }
+                                if (typeof window.__playwright_turnstile_ready_callback === 'function') {
+                                    window.__playwright_turnstile_ready_callback();
+                                }
+                            } catch (e) {}
+                        }
+                    });
+
+                    const originalSet = Object.getOwnPropertyDescriptor(window, 'turnstile');
+                    if (!originalSet || !originalSet.configurable) {
+                        let storedValue = window.turnstile;
+                        Object.defineProperty(window, 'turnstile', {
+                            configurable: true,
+                            enumerable: true,
+                            get() {
+                                return storedValue;
+                            },
+                            set(value) {
+                                storedValue = value;
+                                try {
+                                    if (value && typeof value === 'object') {
+                                        const originalRender = value.render;
+                                        if (typeof originalRender === 'function') {
+                                            value.render = function(...args) {
+                                                if (args.length > 0 && typeof args[0] === 'object') {
+                                                    const options = args[0];
+                                                    if (typeof options.callback === 'function') {
+                                                        window.__playwright_turnstile_callback = options.callback;
+                                                    }
+                                                    if (typeof options['data-callback'] === 'function') {
+                                                        window.__playwright_turnstile_callback = options['data-callback'];
+                                                    }
+                                                }
+                                                return originalRender.apply(this, args);
+                                            };
+                                        }
+                                        const originalReady = value.ready;
+                                        if (typeof originalReady === 'function') {
+                                            value.ready = function(cb) {
+                                                if (typeof cb === 'function') {
+                                                    window.__playwright_turnstile_ready_callback = cb;
+                                                }
+                                                return originalReady.apply(this, [cb]);
+                                            };
+                                        }
+                                    }
+                                } catch (e) {}
+                                return storedValue;
+                            }
+                        });
+                    }
+
+                    window.addEventListener('DOMContentLoaded', setupTurnstileInterceptor);
+                    setupTurnstileInterceptor();
+                }
+                """
+            )
+            logger.debug("✅ Patch de Turnstile instalado no page.init_script")
+        except Exception as e:
+            logger.warning(f"⚠️ Falha ao instalar patch de Turnstile: {e}")
+
     async def _fill_registration_form(self, page: Page, username: str, password: str, email: str) -> bool:
         """Preenche e submete o formulário de registro usando digitação simulada."""
         try:
@@ -2030,11 +2146,20 @@ class XATBrowserAutomation:
                     button = page.locator(selector).first
                     if await button.count() > 0:
                         logger.info(f"✅ Botão de submit encontrado: {selector}")
-                        await button.click()
+                        try:
+                            await button.click()
+                        except Exception as click_error:
+                            logger.warning(f"⚠️ Clique normal falhou para {selector}: {click_error}. Tentando JS .click()")
+                            try:
+                                await page.evaluate(f'document.querySelector("{selector}")?.click()')
+                                logger.info(f"✅ Clique JS executado em {selector}")
+                            except Exception as js_click_error:
+                                logger.warning(f"⚠️ Clique JS falhou para {selector}: {js_click_error}")
+                                raise
                         submit_found = True
                         break
                 except Exception as e:
-                    logger.debug(f"  Seletor {selector} não encontrado: {e}")
+                    logger.debug(f"  Seletor {selector} não encontrado ou click falhou: {e}")
                     continue
 
             if not submit_found:
@@ -2045,7 +2170,13 @@ class XATBrowserAutomation:
                     logger.info("✅ Botão de submit clicado via fallback force=True")
                     submit_found = True
                 except Exception as e:
-                    logger.warning(f"⚠️ Fallback do submit também falhou: {e}")
+                    logger.warning(f"⚠️ Fallback do submit também falhou: {e}. Tentando JS .click() no link direto")
+                    try:
+                        await page.evaluate('document.querySelector("a#butregister")?.click()')
+                        logger.info("✅ Clique JS executado em a#butregister")
+                        submit_found = True
+                    except Exception as js_error:
+                        logger.warning(f"⚠️ Clique JS em a#butregister falhou: {js_error}")
 
             # Esperar um pouco após o clique para o XAT processar o registro
             logger.info("⏳ Aguardando 3s após o clique para a mensagem final aparecer...")
@@ -2383,6 +2514,12 @@ class XATBrowserAutomation:
                 window.grecaptchaResponse = token;
                 window.recaptchaResponse = token;
                 window.xatCaptchaToken = token;
+
+                if (typeof window.__playwright_dispatch_turnstile_token === 'function') {
+                    try {
+                        window.__playwright_dispatch_turnstile_token(token);
+                    } catch (e) {}
+                }
 
                 document.querySelectorAll('[data-callback], [data-recaptcha-callback], [data-sitekey]').forEach(element => {
                     const callbackName = element.getAttribute('data-callback') || element.getAttribute('data-recaptcha-callback');
