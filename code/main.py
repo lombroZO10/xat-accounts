@@ -2195,8 +2195,8 @@ class XATBrowserAutomation:
 
             # Garantir que token de captcha está injetado
             await self._inject_captcha_token_if_missing(page)
-            logger.info("⏳ Aguardando 10s para o Cloudflare processar o token injetado antes de enviar o registro...")
-            await page.wait_for_timeout(10000)
+            logger.info("⏳ Aguardando 15s para o Cloudflare processar o token injetado antes de enviar o registro...")
+            await page.wait_for_timeout(15000)
 
             await page.evaluate(
                 """
@@ -2647,6 +2647,22 @@ class XATBrowserAutomation:
                 if (window.__cf_turnstile_config && window.__cf_turnstile_config.sitekey) {
                     invokeCallback(window.__cf_turnstile_config.callback || window.__cf_turnstile_config['data-callback']);
                 }
+
+                const executeTurnstile = () => {
+                    if (window.turnstile) {
+                        try {
+                            if (typeof window.turnstile.execute === 'function') {
+                                window.turnstile.execute();
+                            }
+                        } catch (e) {}
+                        try {
+                            if (typeof window.turnstile === 'function') {
+                                window.turnstile(token);
+                            }
+                        } catch (e) {}
+                    }
+                };
+                executeTurnstile();
             }
             """,
             token
