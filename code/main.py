@@ -66,7 +66,7 @@ DEFAULT_CONFIG = {
         "enabled": True,
         "headless": True,
         "proxy_rotation": True,
-        "captcha_timeout": 40,
+        "captcha_timeout": 60,
         "page_timeout": 30000
     },
     "captcha_solver": {
@@ -1825,18 +1825,26 @@ class XATBrowserAutomation:
             logger.info("🔒 Aguardando carregamento do widget de captcha...")
             await self._simulate_human_interaction(page)
 
-            captcha_timeout = self.config['browser_automation'].get('captcha_timeout', 40)
-            wait_timeout = min(captcha_timeout * 1000, 60000)  # Aumentado para 60s máximo
+            captcha_timeout = self.config['browser_automation'].get('captcha_timeout', 60)
+            wait_timeout = min(captcha_timeout * 1000, 90000)  # Até 90s para widgets lentos de Turnstile
+
+            await page.wait_for_load_state('networkidle', timeout=wait_timeout)
 
             sitekey = await self._extract_sitekey_from_full_page_content(page)
             if sitekey:
                 logger.info(f"✅ Sitekey encontrada via regex/HTML antes do widget visível: {sitekey}")
             else:
-                logger.info("🔍 Sitekey não encontrada no HTML, aguardando widget visível por até 40s")
+                logger.info(f"🔍 Sitekey não encontrada no HTML, aguardando widget visível por até {wait_timeout // 1000}s")
                 await page.wait_for_function(
                     """
                     () => {
-                        return document.querySelector('[data-sitekey]') || document.querySelector('.g-recaptcha') || document.querySelector('iframe[src*="turnstile"]') || document.querySelector('iframe[src*="captcha"]');
+                        return document.querySelector('[data-sitekey]')
+                            || document.querySelector('.cf-turnstile')
+                            || document.querySelector('.g-recaptcha')
+                            || document.querySelector('iframe[src*="turnstile"]')
+                            || document.querySelector('iframe[src*="captcha"]')
+                            || window.__cf_turnstile_config
+                            || window.turnstile;
                     }
                     """,
                     timeout=wait_timeout,
@@ -2011,9 +2019,30 @@ class XATBrowserAutomation:
                 except Exception as e:
                     logger.warning(f"⚠️ Fallback do submit também falhou: {e}")
 
+            # Esperar um pouco após o clique para o XAT processar o registro
+            logger.info("⏳ Aguardando 3s após o clique para a mensagem final aparecer...")
+            await page.wait_for_timeout(3000)
+
+            # Captura de diagnóstico após o submit, especialmente útil quando o bot sai cedo demais
+            screenshot_path = f"post_submit_{username}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.png"
+            try:
+                await page.screenshot(path=screenshot_path, full_page=True)
+                logger.info(f"📸 Screenshot pós-submit salva em {screenshot_path}")
+            except Exception as e:
+                logger.warning(f"⚠️ Falha ao salvar screenshot pós-submit: {e}")
+
             await page.wait_for_timeout(2000)
             await page.wait_for_load_state('networkidle', timeout=15000)
-            
+            error_message = await self._monitor_submission_result(page)
+            if error_message:
+                screenshot_path = f"erro_submit_{username}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.png"
+                try:
+                    await page.screenshot(path=screenshot_path, full_page=True)
+                    logger.info(f"📸 Screenshot de erro pós-submit salva em {screenshot_path}")
+                except Exception as e:
+                    logger.warning(f"⚠️ Falha ao salvar screenshot de erro pós-submit: {e}")
+                logger.warning(f"⚠️ Detecção de erro após submissão: {error_message}")
+
             result = await self._verify_registration_result(page, username, email)
 
             logger.info("✅ Formulário submetido")
@@ -2172,14 +2201,17 @@ class XATBrowserAutomation:
             sitekey = await page.evaluate(
                 """
                 () => {
-                    const widget = document.querySelector('[data-sitekey]');
-                    if (widget) {
-                        return widget.dataset.sitekey || widget.getAttribute('data-sitekey');
+                    const getSitekeyFromElement = (element) => {
+                        if (!element) return null;
+                        return element.dataset?.sitekey || element.getAttribute('data-sitekey') || element.getAttribute('sitekey');
+                    };
+
+                    const widget = document.querySelector('[data-sitekey], .cf-turnstile, .g-recaptcha');
+                    const sitekeyFromWidget = getSitekeyFromElement(widget);
+                    if (sitekeyFromWidget) {
+                        return sitekeyFromWidget;
                     }
-                    const recaptcha = document.querySelector('.g-recaptcha');
-                    if (recaptcha) {
-                        return recaptcha.getAttribute('data-sitekey');
-                    }
+
                     const iframe = document.querySelector('iframe[src*="turnstile"]');
                     if (iframe) {
                         try {
@@ -2188,6 +2220,7 @@ class XATBrowserAutomation:
                             return null;
                         }
                     }
+
                     const captchaIframe = document.querySelector('iframe[src*="captcha"]');
                     if (captchaIframe) {
                         try {
@@ -2196,10 +2229,19 @@ class XATBrowserAutomation:
                             return null;
                         }
                     }
-                    const turnstile = document.querySelector('[data-sitekey]');
-                    if (turnstile) {
-                        return turnstile.dataset.sitekey || turnstile.getAttribute('data-sitekey');
+
+                    if (window.__cf_turnstile_config && window.__cf_turnstile_config.sitekey) {
+                        return window.__cf_turnstile_config.sitekey;
                     }
+
+                    if (window.turnstile && typeof window.turnstile === 'object' && window.turnstile.sitekey) {
+                        return window.turnstile.sitekey;
+                    }
+
+                    if (window.grecaptcha && typeof window.grecaptcha === 'object' && window.grecaptcha.sitekey) {
+                        return window.grecaptcha.sitekey;
+                    }
+
                     return null;
                 }
                 """
@@ -2463,13 +2505,15 @@ class XATBrowserAutomation:
             logger.error(f"❌ Erro ao verificar resultado: {e}")
             return False
 
-    async def _monitor_submission_result(self, page: Page) -> None:
+    async def _monitor_submission_result(self, page: Page) -> Optional[str]:
         """Monitora a submissão do formulário para detectar sucesso ou erro imediato."""
         try:
             expected_success = ['welcome', 'home', 'success']
             error_selectors = [
                 'div.alert-danger',
                 '.alert.alert-danger',
+                '.popover-body',
+                '#errore-msg',
                 '.error',
                 '.field-error',
                 '.has-error',
@@ -2487,7 +2531,7 @@ class XATBrowserAutomation:
                     timeout=15000
                 )
                 logger.info("✅ URL de sucesso detectada após submissão")
-                return
+                return None
             except Exception:
                 pass
 
@@ -2496,16 +2540,21 @@ class XATBrowserAutomation:
                     const_error = await page.query_selector(selector)
                     if const_error:
                         text = await const_error.text_content()
-                        logger.warning(f"⚠️ Erro visível detectado após submissão: {text.strip() if text else 'sem texto'}")
-                        return
+                        error_text = text.strip() if text else 'sem texto'
+                        logger.warning(f"⚠️ Erro visível detectado após submissão ({selector}): {error_text}")
+                        return error_text
                 except Exception:
                     continue
 
             current_url = page.url.lower()
             if any(keyword in current_url for keyword in expected_success):
                 logger.info("✅ URL de sucesso detectada após submissão")
+                return None
+
+            return None
         except Exception as e:
             logger.warning(f"⚠️ Falha ao monitorar submissão: {e}")
+            return None
 
     async def _random_delay(self):
         """Aguarda delay aleatório entre ações"""
