@@ -1825,7 +1825,7 @@ class XATBrowserAutomation:
             logger.info("🔒 Aguardando carregamento do widget de captcha...")
             await self._simulate_human_interaction(page)
 
-            captcha_timeout = self.config['browser_automation'].get('captcha_timeout', 60)
+            captcha_timeout = max(self.config['browser_automation'].get('captcha_timeout', 60), 60)
             wait_timeout = min(captcha_timeout * 1000, 90000)  # Até 90s para widgets lentos de Turnstile
 
             await page.wait_for_load_state('networkidle', timeout=wait_timeout)
@@ -2308,36 +2308,69 @@ class XATBrowserAutomation:
         }
 
     async def _inject_captcha_token(self, page: Page, token: str) -> None:
-        """Injeta o token do solver nos campos escondidos do formulário."""
+        """Injeta o token do solver nos campos escondidos do formulário e dispara callbacks."""
         await page.evaluate(
             """
             (token) => {
-                const fields = [
+                const dispatchChange = (element) => {
+                    if (!element) return;
+                    element.value = token;
+                    element.setAttribute('value', token);
+                    element.dispatchEvent(new Event('input', { bubbles: true }));
+                    element.dispatchEvent(new Event('change', { bubbles: true }));
+                    element.dispatchEvent(new Event('blur', { bubbles: true }));
+                };
+
+                const selectors = [
                     'textarea[name="cf-turnstile-response"]',
                     'input[name="cf-turnstile-response"]',
                     'textarea[name="g-recaptcha-response"]',
                     'input[name="g-recaptcha-response"]'
                 ];
 
-                fields.forEach(selector => {
+                selectors.forEach(selector => {
                     let element = document.querySelector(selector);
                     if (!element) {
                         const tag = selector.startsWith('textarea') ? 'textarea' : 'input';
                         element = document.createElement(tag);
                         element.setAttribute('name', selector.includes('cf-turnstile-response') ? 'cf-turnstile-response' : 'g-recaptcha-response');
                         element.style.display = 'none';
-                        if (tag === 'textarea') {
-                            element.value = token;
-                        } else {
-                            element.value = token;
-                        }
                         document.body.appendChild(element);
-                    } else {
-                        element.value = token;
                     }
-                    element.dispatchEvent(new Event('input', { bubbles: true }));
-                    element.dispatchEvent(new Event('change', { bubbles: true }));
+                    dispatchChange(element);
                 });
+
+                const invokeCallback = (callbackName) => {
+                    if (!callbackName) return;
+                    const callback = window[callbackName];
+                    if (typeof callback === 'function') {
+                        try {
+                            callback(token);
+                        } catch (e) {}
+                    }
+                };
+
+                document.querySelectorAll('[data-callback], [data-recaptcha-callback], [data-sitekey]').forEach(element => {
+                    const callbackName = element.getAttribute('data-callback') || element.getAttribute('data-recaptcha-callback');
+                    invokeCallback(callbackName);
+                });
+
+                if (window.turnstile && typeof window.turnstile === 'object') {
+                    try {
+                        if (typeof window.turnstile.ready === 'function') {
+                            window.turnstile.ready();
+                        }
+                    } catch (e) {}
+                    try {
+                        if (typeof window.turnstile.render === 'function') {
+                            window.turnstile.render();
+                        }
+                    } catch (e) {}
+                }
+
+                if (window.__cf_turnstile_config && window.__cf_turnstile_config.sitekey) {
+                    invokeCallback(window.__cf_turnstile_config.callback || window.__cf_turnstile_config['data-callback']);
+                }
             }
             """,
             token
