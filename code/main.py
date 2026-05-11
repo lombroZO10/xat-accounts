@@ -2194,8 +2194,8 @@ class XATBrowserAutomation:
 
             # Garantir que token de captcha está injetado
             await self._inject_captcha_token_if_missing(page)
-            logger.info("⏳ Aguardando 15s para o Cloudflare processar o token injetado antes de enviar o registro...")
-            await page.wait_for_timeout(15000)
+            logger.info("⏳ Aguardando 5s para o Cloudflare processar o token injetado antes de enviar o registro...")
+            await page.wait_for_timeout(5000)
 
             await page.evaluate(
                 """
@@ -2204,6 +2204,49 @@ class XATBrowserAutomation:
                     if (registerButton) {
                         registerButton.classList.remove('disabled');
                         registerButton.removeAttribute('disabled');
+                    }
+                }
+                """
+            )
+
+            await page.evaluate(
+                """
+                () => {
+                    const token = window.cf_token || window.turnstileToken || window.grecaptchaResponse || window.recaptchaResponse || window.xatCaptchaToken || document.querySelector('input[name="cf-turnstile-response"]')?.value || document.querySelector('textarea[name="cf-turnstile-response"]')?.value || document.querySelector('input[name="g-recaptcha-response"]')?.value || document.querySelector('textarea[name="g-recaptcha-response"]')?.value;
+                    if (!token) {
+                        return;
+                    }
+
+                    const invoke = (name) => {
+                        if (!name) return;
+                        const fn = window[name];
+                        if (typeof fn === 'function') {
+                            try {
+                                fn(token);
+                            } catch (e) {}
+                        }
+                    };
+
+                    document.querySelectorAll('[data-callback], [data-recaptcha-callback]').forEach(element => {
+                        invoke(element.getAttribute('data-callback'));
+                        invoke(element.getAttribute('data-recaptcha-callback'));
+                    });
+
+                    if (window.__cf_turnstile_config) {
+                        invoke(window.__cf_turnstile_config.callback || window.__cf_turnstile_config['data-callback']);
+                    }
+
+                    if (window.turnstile) {
+                        try {
+                            if (typeof window.turnstile.execute === 'function') {
+                                window.turnstile.execute();
+                            }
+                        } catch (e) {}
+                        try {
+                            if (typeof window.turnstile === 'function') {
+                                window.turnstile(token);
+                            }
+                        } catch (e) {}
                     }
                 }
                 """
