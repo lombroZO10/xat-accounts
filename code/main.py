@@ -1633,6 +1633,7 @@ class XATBrowserAutomation:
                 'https://httpbin.org/ip',
                 proxies=proxy_dict,
                 timeout=10,
+                verify=False,
                 headers={'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'}
             )
             return response.status_code == 200
@@ -1740,7 +1741,8 @@ class XATBrowserAutomation:
                 locale='pt-BR',
                 timezone_id='America/Sao_Paulo',
                 extra_http_headers=self._build_extra_http_headers(user_agent),
-                proxy=proxy_config
+                proxy=proxy_config,
+                ignore_https_errors=True
             )
             await self.context.route('**/*', self._block_unnecessary_assets)
 
