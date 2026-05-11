@@ -1771,12 +1771,13 @@ class XATBrowserAutomation:
             logger.info("⏳ Aguardando 5s para página intersticial Cloudflare carregar/sumir...")
             await page.wait_for_timeout(5000)
 
+            blocked_status = False
             if response and response.status in [403, 503]:
+                blocked_status = True
                 reason = f"Status de bloqueio na página de login: {response.status}"
-                logger.warning(f"⚠️ {reason}")
+                logger.warning(f"⚠️ {reason} (aguardando validação adicional antes de descartar)")
                 self.last_login_block_reason = reason
-                self._blacklist_current_proxy(reason)
-                return False
+                # Não blacklistar automaticamente; pode haver sitekey Turnstile válida na página.
 
             title = await page.title()
             
@@ -1846,6 +1847,12 @@ class XATBrowserAutomation:
             sitekey = await self._extract_sitekey_from_page(page)
             if sitekey:
                 logger.info(f"✅ Sitekey extraída do login via navegador: {sitekey}")
+            elif blocked_status:
+                title_lower = title.lower() if title else ''
+                if not title_lower.strip() or 'access denied' in title_lower or 'forbidden' in title_lower:
+                    logger.warning("🚫 Proxy realmente bloqueado: 403/503 sem sitekey e título de acesso negado")
+                    self._blacklist_current_proxy("Proxy bloqueado por 403/503 sem sitekey")
+                    return False
 
             return True
 
@@ -2486,12 +2493,19 @@ class XATBrowserAutomation:
             return None
 
     def _extract_sitekey_from_html(self, html_content: str) -> Optional[str]:
-        """Extrai sitekey de conteúdo HTML usando regex."""
+        """Extrai sitekey de conteúdo HTML usando regex e fallback em texto/bruto."""
         try:
+            if not html_content:
+                return None
+
+            html_content = html.unescape(html_content)
             patterns = [
                 r'data-sitekey=["\']([^"\']+)["\']',
-                r'sitekey=(?:["\']?)([^"\'&>\s]+)',
-                r'(0x4[a-zA-Z0-9_-]{18,22})'
+                r'data-cf-turnstile-sitekey=["\']([^"\']+)["\']',
+                r'sitekey\s*[:=]\s*["\'](0x4[a-zA-Z0-9_-]{18,30})["\']',
+                r'"sitekey"\s*:\s*"(0x4[a-zA-Z0-9_-]{18,30})"',
+                r'\bsitekey=(0x4[a-zA-Z0-9_-]{18,30})\b',
+                r'(0x4[a-zA-Z0-9_-]{18,30})'
             ]
             for pattern in patterns:
                 match = re.search(pattern, html_content)
@@ -2503,7 +2517,7 @@ class XATBrowserAutomation:
             return None
 
     async def _extract_sitekey_from_full_page_content(self, page: Page) -> Optional[str]:
-        """Busca sitekey no HTML completo da página principal e de frames."""
+        """Busca sitekey no HTML completo da página principal, em frames e no texto da página."""
         try:
             page_content = await page.content()
             sitekey = self._extract_sitekey_from_html(page_content)
@@ -2518,6 +2532,15 @@ class XATBrowserAutomation:
                         return sitekey
                 except Exception:
                     continue
+
+            try:
+                body_text = await page.text_content('body')
+                if body_text:
+                    sitekey = self._extract_sitekey_from_html(body_text)
+                    if sitekey:
+                        return sitekey
+            except Exception:
+                pass
 
             return None
         except Exception as e:
@@ -2677,6 +2700,7 @@ class XATBrowserAutomation:
         """Resolve reCAPTCHA/Turnstile usando 2captcha."""
         provider = self.config['captcha_solver'].get('provider', '2captcha')
         api_key = self.config['captcha_solver'].get('api_key', '')
+        api_key = api_key.strip()
 
         if provider != '2captcha':
             logger.warning(f"⚠️ Provedor de captcha não suportado: {provider}")
@@ -2722,7 +2746,7 @@ class XATBrowserAutomation:
                     if extra_data:
                         params['data'] = extra_data
 
-            response = requests.get('http://2captcha.com/in.php', params=params, timeout=90, proxies=proxies)
+            response = requests.post('http://2captcha.com/in.php', data=params, timeout=90, proxies=proxies)
             data = response.json()
             if data.get('status') != 1:
                 logger.warning(f"⚠️ 2captcha in.php falhou: {data.get('request')}")
