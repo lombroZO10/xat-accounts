@@ -1507,8 +1507,12 @@ class XATBrowserAutomation:
         logger.info("🎭 XAT Browser Automation inicializado")
 
     async def __aenter__(self):
-        await self.initialize()
-        return self
+        try:
+            await self.initialize()
+            return self
+        except Exception:
+            await self.cleanup()
+            raise
 
     async def __aexit__(self, exc_type, exc_val, exc_tb):
         await self.cleanup()
@@ -1602,7 +1606,11 @@ class XATBrowserAutomation:
                 self._refresh_proxy_session(self.current_proxy_base)
             else:
                 self.current_proxy = self.current_proxy_base
-            
+
+            if self.current_proxy and not self._test_proxy_ip_and_country(self.current_proxy):
+                logger.warning(f"⚠️ Proxy com Session ID falhou no teste de IP/país: {self.current_proxy}. Tentando próximo...")
+                continue
+
             proxy_display = self.current_proxy.replace('http://', '').replace('https://', '')
             if '@' in proxy_display:
                 proxy_display = proxy_display.split('@', 1)[1]
@@ -1795,7 +1803,7 @@ class XATBrowserAutomation:
             # Teste rápido com httpbin.org/ip (timeout de 5s - mais curto para falhar rápido)
             try:
                 response = requests.get(
-                    'https://httpbin.org/ip',
+                    'http://httpbin.org/ip',
                     proxies=proxy_dict,
                     timeout=5,
                     verify=False,
@@ -1851,7 +1859,19 @@ class XATBrowserAutomation:
         if self.proxy_session_enabled:
             logger.info(f"🔄 Renovando Session ID para proxy base: {self.current_proxy_base}")
             self._refresh_proxy_session(self.current_proxy_base)
-            logger.info(f"✅ Proxy com Session ID definido: {self.current_proxy}")
+            if not self._test_proxy_ip_and_country(self.current_proxy):
+                logger.warning("⚠️ Proxy com Session ID falhou no teste de IP/país após refresh; tentando próximo proxy...")
+                if len(self.proxies) > 1:
+                    next_proxy = self._choose_next_proxy(exclude_current=True)
+                    if not next_proxy:
+                        logger.error("❌ Não foi possível encontrar proxy válido após falha no teste de proxy com Session ID")
+                        raise Exception("Falha no teste de proxy com Session ID e nenhum proxy alternativo válido encontrado")
+                    logger.info(f"✅ Proxy alternativo selecionado: {next_proxy}")
+                else:
+                    logger.error("❌ Falha no teste de proxy com Session ID e não há proxies alternativos disponíveis")
+                    raise Exception("Falha no teste de proxy com Session ID e não há proxies alternativos disponíveis")
+            else:
+                logger.info(f"✅ Proxy com Session ID definido: {self.current_proxy}")
         else:
             self.current_proxy = self.current_proxy_base
             logger.info(f"✅ Session ID desabilitado, usando proxy base: {self.current_proxy_base}")
@@ -1876,7 +1896,8 @@ class XATBrowserAutomation:
             # - ifconfig.me/json: {"ip": "1.2.3.4"}
             # - api.ipify.org: {"ip": "1.2.3.4"}
             ip_test_endpoints = [
-                'https://httpbin.org/ip',              # httpbin é mais robusto
+                'http://httpbin.org/ip',              # testar primeiro em HTTP para proxies que falham em HTTPS/TLS
+                'https://httpbin.org/ip',             # httpbin é mais robusto
                 'https://ifconfig.me/json',           # ifconfig como fallback
                 'https://api.ipify.org?format=json'   # ipify como último recurso
             ]
