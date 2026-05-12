@@ -1478,9 +1478,7 @@ class XATBrowserAutomation:
             "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Edge/131.0.0.0",
             "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Edge/130.0.0.0",
             "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36",
-            "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/18.1.1 Safari/605.1.15",
-            "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36",
-            "Mozilla/5.0 (X11; Ubuntu; Linux x86_64; rv:133.0) Gecko/20100101 Firefox/133.0"
+            "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/18.1.1 Safari/605.1.15"
         ]
         self.screen_resolutions = [
             {'width': 1366, 'height': 768},
@@ -2019,13 +2017,15 @@ class XATBrowserAutomation:
                 stealth_config = Stealth(
                     webgl_vendor_override='Intel Inc.',
                     webgl_renderer_override='Intel(R) Iris(TM) Graphics 6100',
-                    navigator_vendor_override='Google Inc.',
-                    navigator_platform_override='Win32',
+                    navigator_vendor_override=self._get_navigator_vendor_override(user_agent),
+                    navigator_platform_override=self._get_navigator_platform_override(user_agent),
+                    navigator_user_agent_override=user_agent,
+                    sec_ch_ua_override=self._get_sec_ch_ua(user_agent),
                     navigator_languages_override=('pt-BR', 'pt', 'en-US', 'en'),
                     chrome_app=True,
                     chrome_csi=True,
                     chrome_load_times=True,
-                    chrome_runtime=False,
+                    chrome_runtime=True,
                     hairline=True,
                     iframe_content_window=True,
                     media_codecs=True,
@@ -2034,6 +2034,9 @@ class XATBrowserAutomation:
                     navigator_permissions=True,
                     navigator_platform=True,
                     navigator_plugins=True,
+                    navigator_user_agent=True,
+                    navigator_user_agent_data=True,
+                    navigator_vendor=True,
                     navigator_webdriver=True,
                     error_prototype=True,
                     sec_ch_ua=True,
@@ -2553,6 +2556,14 @@ class XATBrowserAutomation:
 
             login_url = f"{self.LOGIN_URL}?mode=1&UserId={user_id}&k2={k2_token}"
             await self._patch_turnstile_callbacks(page)
+
+            logger.info("🧍 Navegando para a página inicial antes de acessar /login para simular tráfego humano")
+            try:
+                await page.goto(self.BASE_URL, wait_until='domcontentloaded', timeout=30000)
+                await self._perform_pre_login_home_flow(page)
+            except Exception as e:
+                logger.warning(f"⚠️ Falha ao visitar home antes do login: {e}")
+
             response = await page.goto(login_url, wait_until='networkidle', timeout=45000)
 
             # Aguardar a página intersticial do Cloudflare sumir ("Checking your browser")
@@ -2691,6 +2702,12 @@ class XATBrowserAutomation:
 
             await page.wait_for_load_state('networkidle', timeout=wait_timeout)
 
+            if await self._detect_cloudflare_challenge(page, 'captcha'):
+                reason = "Cloudflare challenge detectado antes de iniciar resolução de captcha"
+                logger.warning(f"⚠️ {reason}")
+                self.last_captcha_block_reason = reason
+                return False
+
             sitekey = await self._extract_sitekey_from_full_page_content(page)
             if sitekey:
                 if not self._is_allowed_sitekey(sitekey):
@@ -2794,8 +2811,7 @@ class XATBrowserAutomation:
                         "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36",
                         "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/90.0.4430.85 Safari/537.36",
                         "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:89.0) Gecko/20100101 Firefox/89.0",
-                        "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36",
-                        "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36"
+                        "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36"
                     ]
                     
                     new_user_agent = random.choice(user_agents)
@@ -2808,7 +2824,8 @@ class XATBrowserAutomation:
                                 get() {{ return '{new_user_agent}'; }}
                             }});
                         """)
-                        logger.info("🔄 Recarregando página com novo User-Agent...")
+                        await page.context.set_extra_http_headers(self._build_extra_http_headers(new_user_agent))
+                        logger.info("🔄 Recarregando página com novo User-Agent e headers sec-ch-ua sincronizados...")
                         await page.reload(wait_until='networkidle')
                         logger.info("✅ Página recarregada com sucesso")
                         
@@ -2830,7 +2847,7 @@ class XATBrowserAutomation:
                 logger.warning("⚠️ Clique humanizado falhou, mas continuando mesmo assim...")
 
             # Aguardar um pouco após o clique para o widget processar
-            await page.wait_for_timeout(2000)
+            await self._random_delay(page, 1800, 2500)
 
             # Obter user-agent do navegador para sincronização com 2Captcha
             user_agent = await page.evaluate("navigator.userAgent")
@@ -2853,40 +2870,116 @@ class XATBrowserAutomation:
     async def _simulate_human_interaction(self, page: Page) -> None:
         """Simula movimento humano para ajudar o Turnstile a carregar."""
         try:
-            await page.mouse.move(100, 100, steps=8)
-            await page.wait_for_timeout(200)
-            await page.mouse.wheel(0, 500)
-            await page.wait_for_timeout(200)
-            await page.mouse.move(200, 150, steps=8)
-            await page.wait_for_timeout(200)
+            x1 = random.randint(80, 160)
+            y1 = random.randint(80, 160)
+            x2 = random.randint(160, 320)
+            y2 = random.randint(120, 220)
+            await page.mouse.move(x1, y1, steps=random.randint(8, 14))
+            await page.wait_for_timeout(random.randint(150, 350))
+            await page.mouse.wheel(0, random.randint(300, 600))
+            await page.wait_for_timeout(random.randint(150, 350))
+            await page.mouse.move(x2, y2, steps=random.randint(8, 14))
+            await page.wait_for_timeout(random.randint(150, 350))
         except Exception as e:
             logger.debug(f"⚠️ Falha ao simular interação humana: {e}")
+
+    async def _random_delay(self, page: Page, min_ms: int = 900, max_ms: int = 2500) -> None:
+        """Espera um tempo aleatório para simular comportamento humano."""
+        delay = int(random.uniform(min_ms, max_ms))
+        await page.wait_for_timeout(delay)
 
     async def _simulate_mouse_movement(self, page: Page) -> None:
         """Simula movimento de mouse aleatório para despertar o Turnstile."""
         try:
             logger.info("🐭 Simulando movimento de mouse aleatório para despertar Turnstile...")
-            # Movimento aleatório por 2-3 segundos
-            duration = random.randint(2000, 3000)
+            duration = random.randint(2200, 3400)
             start_time = asyncio.get_event_loop().time()
-            
+
             while (asyncio.get_event_loop().time() - start_time) < (duration / 1000):
-                # Movimento para posição aleatória na tela
-                x = random.randint(50, 1800)
+                x = random.randint(50, 1600)
                 y = random.randint(50, 900)
-                steps = random.randint(5, 15)
+                steps = random.randint(6, 18)
                 await page.mouse.move(x, y, steps=steps)
-                await page.wait_for_timeout(random.randint(100, 300))
-                
-                # Ocasionalmente scroll
-                if random.random() < 0.3:
-                    delta_y = random.randint(-200, 200)
+                await page.wait_for_timeout(random.randint(120, 360))
+
+                if random.random() < 0.4:
+                    delta_y = random.randint(-250, 250)
                     await page.mouse.wheel(0, delta_y)
-                    await page.wait_for_timeout(random.randint(200, 500))
-            
+                    await page.wait_for_timeout(random.randint(200, 520))
+
             logger.info("✅ Movimento de mouse concluído")
         except Exception as e:
             logger.debug(f"⚠️ Falha ao simular movimento de mouse: {e}")
+
+    async def _detect_cloudflare_challenge(self, page: Page, context: str = 'home') -> bool:
+        """Detecta se a página atual está passando por Cloudflare challenge/bloqueio."""
+        try:
+            title = (await page.title() or '').lower()
+            if not title or 'just a moment' in title or 'checking your browser' in title or 'cloudflare' in title or 'browser integrity' in title:
+                logger.warning(f"⚠️ Cloudflare challenge detectado na {context} (título: '{title}')")
+                try:
+                    await page.wait_for_load_state('networkidle', timeout=15000)
+                    await self._random_delay(page, 2500, 4000)
+                except Exception:
+                    pass
+                return True
+
+            content = (await page.content()).lower()
+            if any(marker in content for marker in ['cloudflare', 'checking your browser', 'verify you are human', 'browser integrity', 'access denied', 'forbidden', 'captcha']):
+                logger.warning(f"⚠️ Cloudflare challenge detectado na {context} via conteúdo da página")
+                return True
+        except Exception as e:
+            logger.debug(f"⚠️ Erro ao detectar Cloudflare challenge na {context}: {e}")
+        return False
+
+    async def _perform_pre_login_home_flow(self, page: Page) -> None:
+        """Visita a home e tenta clicar em CTA de login para criar um histórico humano antes de /login."""
+        try:
+            if await self._detect_cloudflare_challenge(page, 'home inicial'):
+                logger.info("ℹ️ Página inicial abriu um Cloudflare challenge; aguardando e tentando novamente...")
+                await self._random_delay(page, 3000, 5200)
+                await page.reload(wait_until='networkidle', timeout=30000)
+                await self._random_delay(page, 1600, 3200)
+
+            await self._simulate_mouse_movement(page)
+            await self._simulate_human_interaction(page)
+            await self._random_delay(page, 1200, 2800)
+
+            await page.evaluate(
+                """
+                () => {
+                    window.scrollBy({ top: window.innerHeight * 0.35, left: 0, behavior: 'smooth' });
+                }
+                """
+            )
+            await self._random_delay(page, 1200, 2800)
+
+            clicked = await page.evaluate(
+                """
+                () => {
+                    const selectors = ['a', 'button', '[role="button"]'];
+                    const elements = selectors.flatMap(sel => Array.from(document.querySelectorAll(sel)));
+                    const target = elements.find(el => {
+                        const text = (el.textContent || '').trim().toLowerCase();
+                        return /login|entrar|sign in|sign-in|sign_in/.test(text);
+                    });
+                    if (!target) return false;
+                    target.scrollIntoView({ behavior: 'smooth', block: 'center' });
+                    target.click();
+                    return true;
+                }
+                """
+            )
+
+            if clicked:
+                await self._random_delay(page, 2500, 4200)
+                await page.wait_for_load_state('networkidle', timeout=10000)
+                logger.info("✅ CTA de login clicado na home para simular navegação humana")
+            else:
+                await self._random_delay(page, 1300, 2400)
+                logger.info("ℹ️ Não encontrou CTA de login visível na home; continuará com a navegação direta")
+        except Exception as e:
+            logger.warning(f"⚠️ Falha na pré-navegação da home antes do login: {e}")
 
     async def _patch_turnstile_callbacks(self, page: Page) -> None:
         """Instala um patch no Turnstile para capturar callbacks e aceitar token injetado."""
@@ -3791,20 +3884,43 @@ class XATBrowserAutomation:
 
     def _build_extra_http_headers(self, user_agent: str) -> Dict[str, str]:
         """Retorna cabeçalhos Client Hints compatíveis com o User-Agent escolhido."""
-        if 'Edg/' in user_agent or 'Edge/' in user_agent:
-            brand = '"Chromium";v="140", "Microsoft Edge";v="140", ";Not A Brand";v="99"'
-        elif 'Firefox/' in user_agent:
-            brand = '"Mozilla";v="135", "Firefox";v="135", ";Not A Brand";v="99"'
-        else:
-            brand = '"Chromium";v="140", "Google Chrome";v="140", ";Not A Brand";v="99"'
-
-        platform = '"Windows"' if 'Windows' in user_agent else '"Linux"'
-
         return {
-            'sec-ch-ua': brand,
+            'sec-ch-ua': self._get_sec_ch_ua(user_agent),
             'sec-ch-ua-mobile': '?0',
-            'sec-ch-ua-platform': platform
+            'sec-ch-ua-platform': self._get_sec_ch_ua_platform(user_agent)
         }
+
+    def _get_sec_ch_ua(self, user_agent: str) -> str:
+        if 'Edg/' in user_agent or 'Edge/' in user_agent:
+            return '"Chromium";v="140", "Microsoft Edge";v="140", ";Not A Brand";v="99"'
+        if 'Firefox/' in user_agent:
+            return '"Mozilla";v="140", "Firefox";v="140", ";Not A Brand";v="99"'
+        if 'Safari/' in user_agent and 'Chrome/' not in user_agent:
+            return '"Safari";v="18", "Apple WebKit";v="605", ";Not A Brand";v="99"'
+        return '"Chromium";v="140", "Google Chrome";v="140", ";Not A Brand";v="99"'
+
+    def _get_sec_ch_ua_platform(self, user_agent: str) -> str:
+        if 'Windows NT' in user_agent:
+            return '"Windows"'
+        if 'Macintosh' in user_agent:
+            return '"macOS"'
+        if 'Android' in user_agent or 'iPhone' in user_agent or 'iPad' in user_agent:
+            return '"Android"'
+        return '"Windows"'
+
+    def _get_navigator_platform_override(self, user_agent: str) -> str:
+        if 'Windows NT' in user_agent:
+            return 'Win32'
+        if 'Macintosh' in user_agent:
+            return 'MacIntel'
+        if 'Android' in user_agent:
+            return 'Android'
+        return 'Win32'
+
+    def _get_navigator_vendor_override(self, user_agent: str) -> str:
+        if 'Safari/' in user_agent and 'Chrome/' not in user_agent:
+            return 'Apple Computer, Inc.'
+        return 'Google Inc.'
 
     async def _validate_captcha_success(self, page: Page, timeout_seconds: int = 30) -> bool:
         """
