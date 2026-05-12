@@ -1469,6 +1469,7 @@ class XATBrowserAutomation:
         self.last_login_block_reason: Optional[str] = None
         self.last_captcha_block_reason: Optional[str] = None
         self.proxy_session_enabled = self.config.get('proxy', {}).get('use_session_ids', True)
+        self.last_proxy_test_error: Optional[str] = None
         self.user_agents = [
             # User-Agents atualizados para 2026 - compatíveis com IPs brasileiros
             "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36",
@@ -1536,8 +1537,15 @@ class XATBrowserAutomation:
                 # ⚠️ Teste de IP/país é obrigatório para proxies residenciais.
                 # Se falhar, rotacionar proxy antes de criar o contexto.
                 try:
-                    if not self._test_proxy_ip_and_country(self.current_proxy):
-                        logger.warning(f"⚠️ Proxy {self.current_proxy} falhou no teste de IP/país. Rotacionando antes de inicializar o contexto...")
+                    if not self._test_proxy_ip_and_country(self.current_proxy, timeout=15):
+                        logger.warning(f"⚠️ Proxy {self.current_proxy} falhou no teste de IP/país. Tentando criar contexto direto como fallback antes de rotacionar...")
+                        try:
+                            await self._create_browser_context()
+                            logger.info("✅ Contexto criado com o último Session ID mesmo sem teste de IP bem-sucedido")
+                            return
+                        except Exception as fallback_error:
+                            logger.warning(f"⚠️ Fallback direto falhou: {fallback_error}")
+
                         if attempt >= max_attempts - 1:
                             raise Exception("Falha no teste de IP/país para todos os proxies")
                         self._choose_next_proxy(exclude_current=True)
@@ -1602,12 +1610,15 @@ class XATBrowserAutomation:
             
             # Se proxy base passou, aplicar Session ID
             self.current_proxy_base = normalized_base or proxy_candidate
+            session_ok = True
             if self.proxy_session_enabled:
-                self._refresh_proxy_session(self.current_proxy_base)
+                session_ok = self._refresh_proxy_session_with_retries(self.current_proxy_base, max_retries=3, timeout=15)
+                if not session_ok:
+                    logger.warning("⚠️ Nenhum Session ID válido encontrado para este proxy. Mantendo o último Session ID gerado como fallback.")
             else:
                 self.current_proxy = self.current_proxy_base
 
-            if self.current_proxy and not self._test_proxy_ip_and_country(self.current_proxy):
+            if session_ok and self.current_proxy and not self._test_proxy_ip_and_country(self.current_proxy, timeout=15):
                 logger.warning(f"⚠️ Proxy com Session ID falhou no teste de IP/país: {self.current_proxy}. Tentando próximo...")
                 continue
 
@@ -1771,6 +1782,36 @@ class XATBrowserAutomation:
         logger.info(f"🔐 [Session ID: ...{session_suffix}] Proxy renovado: {masked}")
         return self.current_proxy
 
+    def _refresh_proxy_session_with_retries(self, proxy_base: Optional[str] = None, max_retries: int = 3, timeout: int = 15) -> bool:
+        if proxy_base:
+            normalized_base = self._normalize_proxy_base(proxy_base)
+            if normalized_base:
+                self.current_proxy_base = normalized_base
+
+        if not self.current_proxy_base:
+            logger.error("❌ Nenhum proxy base disponível para renovar Session ID")
+            return False
+
+        if not self._proxy_supports_session(self.current_proxy_base):
+            logger.warning("⚠️ Proxy atual não suporta Session ID. Mantendo proxy sem sessão personalizada.")
+            self.current_proxy = self.current_proxy_base
+            return True
+
+        for attempt in range(1, max_retries + 1):
+            self._refresh_proxy_session(self.current_proxy_base)
+            if self._test_proxy_ip_and_country(self.current_proxy, timeout=timeout):
+                logger.info(f"✅ Proxy com Session ID definido após {attempt} tentativa(s): {self.current_proxy}")
+                self.last_proxy_test_error = None
+                return True
+            logger.warning(
+                f"⚠️ Session ID {attempt} falhou no teste de IP/país para proxy {self.current_proxy}: {self.last_proxy_test_error}. Gerando novo Session ID..."
+            )
+
+        logger.warning(
+            f"⚠️ Todas as {max_retries} tentativas de Session ID falharam para proxy {self.current_proxy_base}. Último erro: {self.last_proxy_test_error}"
+        )
+        return False
+
     async def _refresh_proxy_session_and_recreate(self) -> bool:
         if self.current_proxy_base is None and self.proxies:
             self.current_proxy_base = self.proxies[0]
@@ -1800,12 +1841,12 @@ class XATBrowserAutomation:
             if not proxy_dict:
                 return False
 
-            # Teste rápido com httpbin.org/ip (timeout de 5s - mais curto para falhar rápido)
+            # Teste rápido com httpbin.org/ip (timeout de 15s para proxies residenciais)
             try:
                 response = requests.get(
                     'http://httpbin.org/ip',
                     proxies=proxy_dict,
-                    timeout=5,
+                    timeout=15,
                     verify=False,
                     headers={'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'}
                 )
@@ -1858,18 +1899,11 @@ class XATBrowserAutomation:
         # Aplicar Session ID se habilitado
         if self.proxy_session_enabled:
             logger.info(f"🔄 Renovando Session ID para proxy base: {self.current_proxy_base}")
-            self._refresh_proxy_session(self.current_proxy_base)
-            if not self._test_proxy_ip_and_country(self.current_proxy):
-                logger.warning("⚠️ Proxy com Session ID falhou no teste de IP/país após refresh; tentando próximo proxy...")
-                if len(self.proxies) > 1:
-                    next_proxy = self._choose_next_proxy(exclude_current=True)
-                    if not next_proxy:
-                        logger.error("❌ Não foi possível encontrar proxy válido após falha no teste de proxy com Session ID")
-                        raise Exception("Falha no teste de proxy com Session ID e nenhum proxy alternativo válido encontrado")
-                    logger.info(f"✅ Proxy alternativo selecionado: {next_proxy}")
-                else:
-                    logger.error("❌ Falha no teste de proxy com Session ID e não há proxies alternativos disponíveis")
-                    raise Exception("Falha no teste de proxy com Session ID e não há proxies alternativos disponíveis")
+            session_ok = self._refresh_proxy_session_with_retries(self.current_proxy_base, max_retries=3, timeout=15)
+            if not session_ok:
+                logger.warning(
+                    "⚠️ Proxy base passou no teste, mas todos os Session IDs falharam. Continuando com o último Session ID gerado como fallback."
+                )
             else:
                 logger.info(f"✅ Proxy com Session ID definido: {self.current_proxy}")
         else:
@@ -1881,7 +1915,7 @@ class XATBrowserAutomation:
         # Log com o proxy definido
         logger.info(f"✅ Proxy inicial OBRIGATÓRIO selecionado: {self.current_proxy_base}")
 
-    def _test_proxy_ip_and_country(self, proxy_str: str) -> bool:
+    def _test_proxy_ip_and_country(self, proxy_str: str, timeout: int = 15) -> bool:
         """Testa se o proxy está funcionando com múltiplos endpoints de teste."""
         try:
             proxy_dict = self._build_proxy_dict(proxy_str)
@@ -1904,6 +1938,7 @@ class XATBrowserAutomation:
             
             ip = None
             endpoint_name = "desconhecido"
+            endpoint_errors: List[str] = []
             for endpoint_url in ip_test_endpoints:
                 try:
                     endpoint_name = endpoint_url.split('/')[2]
@@ -1911,7 +1946,7 @@ class XATBrowserAutomation:
                     response = requests.get(
                         endpoint_url,
                         proxies=proxy_dict,
-                        timeout=5,  # Timeout curto para falhar rápido
+                        timeout=timeout,
                         verify=False,
                         headers={'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'}
                     )
@@ -1927,25 +1962,38 @@ class XATBrowserAutomation:
                             break  # Sucesso - parar de tentar outros endpoints
                         else:
                             logger.debug(f"⚠️ {endpoint_url} retornou JSON sem IP válido: {ip_data}")
+                            endpoint_errors.append(f"{endpoint_name}: JSON inválido")
                             continue
                     else:
                         logger.debug(f"⚠️ Endpoint {endpoint_url} retornou status {response.status_code}")
+                        endpoint_errors.append(f"{endpoint_name}: status {response.status_code}")
                         continue
-                except requests.exceptions.Timeout:
-                    logger.debug(f"⏱️ Timeout ao testar {endpoint_name}")
+                except requests.exceptions.Timeout as te:
+                    error_msg = f"{endpoint_name}: Timeout ({te})"
+                    endpoint_errors.append(error_msg)
+                    logger.debug(f"⏱️ {error_msg}")
                     continue
                 except requests.exceptions.ProxyError as pe:
-                    logger.debug(f"🚫 Erro de proxy ao testar {endpoint_name}: {str(pe)[:60]}")
+                    error_msg = f"{endpoint_name}: ProxyError ({pe})"
+                    endpoint_errors.append(error_msg)
+                    logger.debug(f"🚫 {error_msg}")
                     continue
                 except requests.exceptions.ConnectionError as ce:
-                    logger.debug(f"🔌 Erro de conexão ao testar {endpoint_name}: {str(ce)[:60]}")
+                    error_msg = f"{endpoint_name}: ConnectionError ({ce})"
+                    endpoint_errors.append(error_msg)
+                    logger.debug(f"🔌 {error_msg}")
                     continue
                 except Exception as e:
-                    logger.debug(f"❌ Erro ao testar {endpoint_name}: {type(e).__name__}: {str(e)[:60]}")
+                    error_msg = f"{endpoint_name}: {type(e).__name__} ({e})"
+                    endpoint_errors.append(error_msg)
+                    logger.debug(f"❌ {error_msg}")
                     continue
             
             if not ip:
-                logger.warning(f"⚠️ Nenhum endpoint de IP conseguiu responder com IP válido para proxy: {proxy_str[:50]}...")
+                self.last_proxy_test_error = '; '.join(endpoint_errors[-5:]) if endpoint_errors else 'Nenhum detalhe disponível'
+                logger.warning(
+                    f"⚠️ Nenhum endpoint de IP conseguiu responder com IP válido para proxy: {proxy_str[:50]}... Erros: {self.last_proxy_test_error}"
+                )
                 return False
             
             logger.info(f"🌍 IP detectado via proxy: {ip}")
