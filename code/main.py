@@ -2031,6 +2031,7 @@ class XATBrowserAutomation:
                     login_success = await self._access_login_page(page, user_id, k2_token)
                     if login_success:
                         break
+
                 except CloudflareHardBlockException as e:
                     logger.warning(f"🚫 Cloudflare Hard Block detectado: {e}")
                     # Força rotação imediata de proxy
@@ -2107,9 +2108,43 @@ class XATBrowserAutomation:
                 await page.close()
                 return False
 
-            # Passo 3: Preencher e submeter formulário
-            success = await self._fill_registration_form(page, username, password, email, proxy_inicial)
-            if not success:
+            # Passo 3: Preencher e submeter formulário com loop de re-tentativa para captcha
+            registration_success = False
+            captcha_retry_attempts = 0
+            max_captcha_retries = 3
+
+            while captcha_retry_attempts < max_captcha_retries and not registration_success:
+                try:
+                    logger.info(f"📝 Tentativa de registro {captcha_retry_attempts + 1}/{max_captcha_retries}")
+                    success = await self._fill_registration_form(page, username, password, email, proxy_inicial)
+                    if success:
+                        registration_success = True
+                        break
+                    else:
+                        logger.warning(f"⚠️ Tentativa {captcha_retry_attempts + 1} falhou")
+                        captcha_retry_attempts += 1
+
+                except Exception as e:
+                    error_msg = str(e).lower()
+                    if 'captcha error detected' in error_msg or 'captcha' in error_msg:
+                        logger.warning(f"🚨 Erro de captcha detectado na tentativa {captcha_retry_attempts + 1}: {e}")
+                        if captcha_retry_attempts < max_captcha_retries - 1:
+                            # Aguardar antes de tentar novamente
+                            await page.wait_for_timeout(3000)
+                            captcha_retry_attempts += 1
+                            continue
+                        else:
+                            logger.error(f"❌ Máximo de {max_captcha_retries} tentativas de registro atingido devido a erro de captcha")
+                            await page.close()
+                            return False
+                    else:
+                        # Outro tipo de erro, não tentar novamente
+                        logger.error(f"❌ Erro não relacionado a captcha: {e}")
+                        await page.close()
+                        return False
+
+            if not registration_success:
+                logger.error("❌ Todas as tentativas de registro falharam")
                 await page.close()
                 return False
 
@@ -2475,6 +2510,15 @@ class XATBrowserAutomation:
 
             page_url = page.url
             payload = await self._extract_turnstile_payload(page)
+
+            # Upgrade Final: Clique Humanizado no Widget antes de enviar para 2Captcha
+            logger.info("🖱️ Executando clique humanizado no widget Turnstile...")
+            if not await self._humanize_turnstile_click(page):
+                logger.warning("⚠️ Clique humanizado falhou, mas continuando mesmo assim...")
+
+            # Aguardar um pouco após o clique para o widget processar
+            await page.wait_for_timeout(2000)
+
             # Obter user-agent do navegador para sincronização com 2Captcha
             user_agent = await page.evaluate("navigator.userAgent")
             token = self._resolver_recaptcha(sitekey, page_url, payload, user_agent=user_agent)
@@ -2813,15 +2857,53 @@ class XATBrowserAutomation:
 
             await page.wait_for_timeout(1500)
 
-            # Não clicar mais no widget do Turnstile. Injetar token e seguir direto para o submit.
-            await self._inject_captcha_token_if_missing(page)
-            logger.info("⏳ Aguardando 10s para o Cloudflare processar o token injetado antes de enviar o registro...")
-            if self.current_proxy and '@' in self.current_proxy:
-                proxy_display = self.current_proxy.split('@')[1]
-                logger.info(f"🔒 Mantendo Sticky IP (mesma sessão TCP): {proxy_display}")
-            else:
-                logger.info("🔒 Mantendo Sticky IP (mesma sessão TCP)")
-            await page.wait_for_timeout(10000)
+            # Upgrade Final: Safety Gate + Clique Humanizado + Loop de Re-tentativa
+            captcha_retry_count = 0
+            max_captcha_retries = 3
+            captcha_success = False
+
+            while captcha_retry_count < max_captcha_retries and not captcha_success:
+                logger.info(f"🔄 Tentativa de captcha {captcha_retry_count + 1}/{max_captcha_retries}")
+
+                # 1. Injetar token do captcha
+                await self._inject_captcha_token_if_missing(page)
+                logger.info("⏳ Aguardando processamento do token injetado...")
+
+                # 2. Safety Gate: Validar sucesso do captcha por até 20 segundos
+                if await self._validate_captcha_success(page, timeout_seconds=20):
+                    logger.info("✅ Captcha validado com sucesso - prosseguindo para submissão")
+                    captcha_success = True
+                else:
+                    logger.warning(f"❌ Captcha não validado na tentativa {captcha_retry_count + 1}")
+
+                    if captcha_retry_count < max_captcha_retries - 1:
+                        # Limpar campo de captcha para nova tentativa
+                        await page.evaluate("""
+                            () => {
+                                const fields = document.querySelectorAll('input[name="cf-turnstile-response"], textarea[name="cf-turnstile-response"]');
+                                fields.forEach(field => {
+                                    field.value = '';
+                                    field.removeAttribute('value');
+                                });
+                                // Limpar variáveis globais
+                                window.cf_token = null;
+                                window.turnstileToken = null;
+                                window.grecaptchaResponse = null;
+                            }
+                        """)
+                        logger.info("🧹 Campo de captcha limpo para nova tentativa")
+
+                        # Aguardar um pouco antes de tentar novamente
+                        await page.wait_for_timeout(2000)
+
+                        captcha_retry_count += 1
+                        continue
+                    else:
+                        logger.error(f"❌ Máximo de {max_captcha_retries} tentativas de captcha atingido")
+                        raise Exception("Captcha validation failed after maximum retries")
+
+            # Se chegou aqui, captcha foi validado com sucesso
+            logger.info("🎯 Captcha validado - iniciando submissão do formulário")
 
             await page.evaluate(
                 """
@@ -2963,6 +3045,41 @@ class XATBrowserAutomation:
                 except Exception as e:
                     logger.warning(f"⚠️ Falha ao salvar screenshot de erro pós-submit: {e}")
                 logger.warning(f"⚠️ Detecção de erro após submissão: {error_message}")
+
+                # Upgrade Final: Loop de Re-tentativa para erro de captcha
+                if 'captcha' in error_message.lower() or 'verification' in error_message.lower():
+                    logger.warning("🚨 Erro de captcha detectado! Iniciando loop de re-tentativa...")
+
+                    # Resetar estado do captcha para nova tentativa
+                    await page.evaluate("""
+                        () => {
+                            // Limpar campos de captcha
+                            const fields = document.querySelectorAll('input[name="cf-turnstile-response"], textarea[name="cf-turnstile-response"]');
+                            fields.forEach(field => {
+                                field.value = '';
+                                field.removeAttribute('value');
+                            });
+
+                            // Limpar variáveis globais
+                            window.cf_token = null;
+                            window.turnstileToken = null;
+                            window.grecaptchaResponse = null;
+
+                            // Resetar widget Turnstile se possível
+                            if (window.turnstile && typeof window.turnstile.reset === 'function') {
+                                try {
+                                    window.turnstile.reset();
+                                } catch (e) {}
+                            }
+                        }
+                    """)
+
+                    # Aguardar widget resetar
+                    await page.wait_for_timeout(3000)
+
+                    # Tentar resolver captcha novamente (isso irá incrementar captcha_retry_count)
+                    logger.info("🔄 Tentando resolver captcha novamente...")
+                    raise Exception(f"Captcha error detected: {error_message}")
 
             result = await self._verify_registration_result(page, username, email)
 
@@ -3293,6 +3410,132 @@ class XATBrowserAutomation:
             'sec-ch-ua-mobile': '?0',
             'sec-ch-ua-platform': platform
         }
+
+    async def _validate_captcha_success(self, page: Page, timeout_seconds: int = 20) -> bool:
+        """
+        Safety Gate: Valida visualmente se o Turnstile foi resolvido com sucesso.
+        Verifica se cf-turnstile-response tem valor longo e se há indicador visual de sucesso.
+        """
+        logger.info(f"🔒 Safety Gate: Validando sucesso do captcha por até {timeout_seconds}s...")
+
+        start_time = asyncio.get_event_loop().time()
+        while (asyncio.get_event_loop().time() - start_time) < timeout_seconds:
+            try:
+                # Verificar se o campo cf-turnstile-response tem um token longo
+                token_value = await page.evaluate("""
+                    () => {
+                        const field = document.querySelector('input[name="cf-turnstile-response"], textarea[name="cf-turnstile-response"]');
+                        return field ? field.value : '';
+                    }
+                """)
+
+                if token_value and len(token_value) > 50:  # Token válido é longo
+                    logger.info("✅ Safety Gate: Token válido detectado no campo cf-turnstile-response")
+
+                    # Verificar indicador visual de sucesso no iframe do Turnstile
+                    success_indicator = await page.evaluate("""
+                        () => {
+                            const iframes = document.querySelectorAll('iframe[src*="challenges.cloudflare.com"]');
+                            for (const iframe of iframes) {
+                                try {
+                                    const iframeDoc = iframe.contentDocument || iframe.contentWindow.document;
+                                    if (iframeDoc) {
+                                        // Procurar por elementos que indiquem sucesso
+                                        const successElements = iframeDoc.querySelectorAll('[class*="success"], [class*="checkmark"], .checkmark, [data-success]');
+                                        if (successElements.length > 0) {
+                                            return true;
+                                        }
+                                        // Verificar se há texto indicando sucesso
+                                        const textContent = iframeDoc.body ? iframeDoc.body.textContent : '';
+                                        if (textContent.includes('success') || textContent.includes('verified') || textContent.includes('✓')) {
+                                            return true;
+                                        }
+                                    }
+                                } catch (e) {
+                                    // Cross-origin iframe, não conseguimos acessar
+                                }
+                            }
+                            return false;
+                        }
+                    """)
+
+                    if success_indicator:
+                        logger.info("✅ Safety Gate: Indicador visual de sucesso detectado no Turnstile")
+                        return True
+                    else:
+                        logger.debug("⏳ Safety Gate: Token presente mas aguardando indicador visual...")
+                else:
+                    logger.debug("⏳ Safety Gate: Aguardando token no campo cf-turnstile-response...")
+
+                await page.wait_for_timeout(1000)  # Verificar a cada 1 segundo
+
+            except Exception as e:
+                logger.debug(f"⏳ Safety Gate: Erro na validação (continuando): {e}")
+                await page.wait_for_timeout(1000)
+
+        logger.warning(f"❌ Safety Gate: Timeout de {timeout_seconds}s atingido - captcha não validado")
+        return False
+
+    async def _humanize_turnstile_click(self, page: Page) -> bool:
+        """
+        Clique Humanizado no Widget: Move mouse de forma curva até o centro do widget Turnstile.
+        """
+        try:
+            logger.info("🖱️ Humanizando clique no widget Turnstile...")
+
+            # Obter bounding box do widget Turnstile
+            bbox = await page.evaluate("""
+                () => {
+                    const iframe = document.querySelector('iframe[src*="challenges.cloudflare.com"]');
+                    if (iframe) {
+                        const rect = iframe.getBoundingClientRect();
+                        return {
+                            x: rect.left,
+                            y: rect.top,
+                            width: rect.width,
+                            height: rect.height
+                        };
+                    }
+                    return null;
+                }
+            """)
+
+            if not bbox:
+                logger.warning("⚠️ Widget Turnstile não encontrado para clique humanizado")
+                return False
+
+            # Calcular centro do widget
+            center_x = bbox['x'] + bbox['width'] / 2
+            center_y = bbox['y'] + bbox['height'] / 2
+
+            logger.debug(f"📍 Centro do widget Turnstile: ({center_x}, {center_y})")
+
+            # Movimento de mouse curvo/aleatório até o centro
+            # Começar de uma posição aleatória na tela
+            start_x = random.randint(100, 500)
+            start_y = random.randint(100, 400)
+
+            # Mover para posição inicial
+            await page.mouse.move(start_x, start_y, steps=random.randint(8, 12))
+
+            # Pausa antes do movimento final
+            await page.wait_for_timeout(random.randint(300, 700))
+
+            # Movimento curvo até o centro do widget
+            await page.mouse.move(center_x, center_y, steps=random.randint(12, 18))
+
+            # Pequena pausa antes do clique
+            await page.wait_for_timeout(random.randint(200, 500))
+
+            # Clique humanizado
+            await page.mouse.click(center_x, center_y, button='left', delay=random.randint(50, 150))
+
+            logger.info("✅ Clique humanizado executado no widget Turnstile")
+            return True
+
+        except Exception as e:
+            logger.warning(f"⚠️ Erro no clique humanizado do Turnstile: {e}")
+            return False
 
     async def _inject_captcha_token(self, page: Page, token: str) -> None:
         """
