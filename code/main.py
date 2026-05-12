@@ -1614,12 +1614,12 @@ class XATBrowserAutomation:
             if self.proxy_session_enabled:
                 session_ok = self._refresh_proxy_session_with_retries(self.current_proxy_base, max_retries=3, timeout=15)
                 if not session_ok:
-                    logger.warning("⚠️ Nenhum Session ID válido encontrado para este proxy. Mantendo o último Session ID gerado como fallback.")
+                    logger.warning("⚠️ Nenhum Session ID válido encontrado para este proxy. Mantendo proxy base sem Session ID como fallback.")
             else:
                 self.current_proxy = self.current_proxy_base
 
-            if session_ok and self.current_proxy and not self._test_proxy_ip_and_country(self.current_proxy, timeout=15):
-                logger.warning(f"⚠️ Proxy com Session ID falhou no teste de IP/país: {self.current_proxy}. Tentando próximo...")
+            if self.current_proxy and not self._test_proxy_ip_and_country(self.current_proxy, timeout=15):
+                logger.warning(f"⚠️ Proxy {self.current_proxy} falhou no teste de IP/país: tentando próximo proxy...")
                 continue
 
             proxy_display = self.current_proxy.replace('http://', '').replace('https://', '')
@@ -1810,6 +1810,8 @@ class XATBrowserAutomation:
         logger.warning(
             f"⚠️ Todas as {max_retries} tentativas de Session ID falharam para proxy {self.current_proxy_base}. Último erro: {self.last_proxy_test_error}"
         )
+        self.current_proxy = self.current_proxy_base
+        logger.warning("⚠️ Usando proxy base sem Session ID como fallback para manter o fluxo.")
         return False
 
     async def _refresh_proxy_session_and_recreate(self) -> bool:
