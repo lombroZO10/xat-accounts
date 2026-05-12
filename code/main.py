@@ -1832,6 +1832,7 @@ class XATBrowserAutomation:
         # ⚠️ Testar o PROXY BASE (sem Session ID) antes de aplicar Session ID
         # Isto garante que a autenticação básica funciona.
         logger.info(f"🔍 Testando proxy base (sem Session ID) antes de aplicar Session ID...")
+        logger.debug(f"📌 Proxy base a testar: {self.current_proxy_base}")
         if not self._test_proxy_ip_and_country(self.current_proxy_base):
             logger.warning(f"⚠️ Proxy base falhou no teste. Rotacionando para próximo proxy obrigatório...")
             if len(self.proxies) > 1:
@@ -1843,16 +1844,21 @@ class XATBrowserAutomation:
             else:
                 logger.error("❌ Falha no teste de proxy base e não há proxies alternativos disponíveis")
                 raise Exception("Falha no teste de proxy base e não há proxies alternativos disponíveis")
+        else:
+            logger.info(f"✅ Proxy base passou no teste de IP/país")
 
         # Aplicar Session ID se habilitado
         if self.proxy_session_enabled:
+            logger.info(f"🔄 Renovando Session ID para proxy base: {self.current_proxy_base}")
             self._refresh_proxy_session(self.current_proxy_base)
+            logger.info(f"✅ Proxy com Session ID definido: {self.current_proxy}")
         else:
             self.current_proxy = self.current_proxy_base
+            logger.info(f"✅ Session ID desabilitado, usando proxy base: {self.current_proxy_base}")
 
         self.proxy_index = 0
         
-        # Log com o IP brasileiro confirmado
+        # Log com o proxy definido
         logger.info(f"✅ Proxy inicial OBRIGATÓRIO selecionado: {self.current_proxy_base}")
 
     def _test_proxy_ip_and_country(self, proxy_str: str) -> bool:
@@ -1860,19 +1866,27 @@ class XATBrowserAutomation:
         try:
             proxy_dict = self._build_proxy_dict(proxy_str)
             if not proxy_dict:
+                logger.warning(f"⚠️ Não foi possível construir proxy_dict para: {proxy_str}")
                 return False
 
             # 🔥 MELHORIA: Testar com múltiplos endpoints para máxima resiliência
             # Se um endpoint falhar/timeout, tenta o próximo
+            # Cada endpoint retorna um formato JSON diferente:
+            # - httpbin.org/ip: {"origin": "1.2.3.4"}
+            # - ifconfig.me/json: {"ip": "1.2.3.4"}
+            # - api.ipify.org: {"ip": "1.2.3.4"}
             ip_test_endpoints = [
-                ('https://httpbin.org/ip', 'ip'),              # httpbin é mais robusto
-                ('https://ifconfig.me/json', 'ip'),             # ifconfig como fallback
-                ('https://api.ipify.org?format=json', 'ip')     # ipify como último recurso
+                'https://httpbin.org/ip',              # httpbin é mais robusto
+                'https://ifconfig.me/json',           # ifconfig como fallback
+                'https://api.ipify.org?format=json'   # ipify como último recurso
             ]
             
             ip = None
-            for endpoint_url, ip_field in ip_test_endpoints:
+            endpoint_name = "desconhecido"
+            for endpoint_url in ip_test_endpoints:
                 try:
+                    endpoint_name = endpoint_url.split('/')[2]
+                    logger.debug(f"🔗 Testando endpoint: {endpoint_url}")
                     response = requests.get(
                         endpoint_url,
                         proxies=proxy_dict,
@@ -1882,31 +1896,42 @@ class XATBrowserAutomation:
                     )
                     if response.status_code == 200:
                         ip_data = response.json()
-                        ip = ip_data.get(ip_field, 'Desconhecido')
-                        logger.info(f"✅ IP obtido via {endpoint_url.split('/')[2]}: {ip}")
-                        break  # Sucesso - parar de tentar outros endpoints
+                        logger.debug(f"📊 Resposta JSON de {endpoint_url}: {ip_data}")
+                        
+                        # Tentar extrair IP de diferentes chaves (origin para httpbin, ip para outros)
+                        ip = ip_data.get('origin') or ip_data.get('ip')
+                        
+                        if ip and ip != 'Desconhecido':
+                            logger.info(f"✅ IP obtido via {endpoint_name}: {ip}")
+                            break  # Sucesso - parar de tentar outros endpoints
+                        else:
+                            logger.debug(f"⚠️ {endpoint_url} retornou JSON sem IP válido: {ip_data}")
+                            continue
                     else:
                         logger.debug(f"⚠️ Endpoint {endpoint_url} retornou status {response.status_code}")
                         continue
                 except requests.exceptions.Timeout:
-                    logger.debug(f"⚠️ Timeout ao testar {endpoint_url}")
+                    logger.debug(f"⏱️ Timeout ao testar {endpoint_name}")
                     continue
-                except requests.exceptions.ProxyError:
-                    logger.debug(f"⚠️ Erro de proxy ao testar {endpoint_url}")
+                except requests.exceptions.ProxyError as pe:
+                    logger.debug(f"🚫 Erro de proxy ao testar {endpoint_name}: {str(pe)[:60]}")
+                    continue
+                except requests.exceptions.ConnectionError as ce:
+                    logger.debug(f"🔌 Erro de conexão ao testar {endpoint_name}: {str(ce)[:60]}")
                     continue
                 except Exception as e:
-                    logger.debug(f"⚠️ Erro ao testar {endpoint_url}: {str(e)[:80]}")
+                    logger.debug(f"❌ Erro ao testar {endpoint_name}: {type(e).__name__}: {str(e)[:60]}")
                     continue
             
             if not ip:
-                logger.warning(f"⚠️ Nenhum endpoint de IP conseguiu responder para {proxy_str}")
+                logger.warning(f"⚠️ Nenhum endpoint de IP conseguiu responder com IP válido para proxy: {proxy_str[:50]}...")
                 return False
             
             logger.info(f"🌍 IP detectado via proxy: {ip}")
 
             # Teste de país é OPCIONAL - falha silenciosa
             # Se o proxy funciona, aceitamos mesmo que não seja Brasil (por compatibilidade)
-            # O importante é que o proxy RESPONDEU a uma requisição
+            # O importante é que o proxy RESPONDEU a uma requisição com IP válido
             try:
                 country_response = requests.get(
                     f'http://ip-api.com/json/{ip}',
