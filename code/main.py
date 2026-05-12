@@ -211,7 +211,9 @@ DEFAULT_CONFIG = {
         "headless": True,
         "proxy_rotation": True,
         "captcha_timeout": 60,
-        "page_timeout": 30000
+        "page_timeout": 90000,
+        "home_timeout": 90000,  # Timeout para carregar página inicial (domcontentloaded)
+        "login_timeout": 90000  # Timeout para carregar página de login (networkidle)
     },
     "captcha_solver": {
         "enabled": False,
@@ -1527,13 +1529,23 @@ class XATBrowserAutomation:
                     logger.info(f"ℹ️ Tentativa {attempt + 1}: Rotacionando para novo proxy...")
                     self._choose_next_proxy(exclude_current=(attempt > 0))
                 
-                # ⚠️ Teste de IP/país é opcional - falha silenciosa na primeira tentativa
-                # Se falhar, ainda tenta criar o contexto (pode funcionar mesmo falhando no teste)
+                # ⚠️ Teste de IP/país é obrigatório para proxies residenciais.
+                # Se falhar, rotacionar proxy antes de criar o contexto.
                 try:
                     if not self._test_proxy_ip_and_country(self.current_proxy):
-                        logger.warning(f"⚠️ Proxy {self.current_proxy} falhou no teste de IP/país, mas continuando mesmo assim...")
+                        logger.warning(f"⚠️ Proxy {self.current_proxy} falhou no teste de IP/país. Rotacionando antes de inicializar o contexto...")
+                        if attempt >= max_attempts - 1:
+                            raise Exception("Falha no teste de IP/país para todos os proxies")
+                        self._choose_next_proxy(exclude_current=True)
+                        attempt += 1
+                        continue
                 except Exception as test_error:
-                    logger.warning(f"⚠️ Teste de IP/país falhou (continuando): {test_error}")
+                    logger.warning(f"⚠️ Teste de IP/país falhou: {test_error}")
+                    if attempt >= max_attempts - 1:
+                        raise
+                    self._choose_next_proxy(exclude_current=True)
+                    attempt += 1
+                    continue
                 
                 try:
                     await self._create_browser_context()
@@ -1818,10 +1830,19 @@ class XATBrowserAutomation:
         self.current_proxy_base = self._normalize_proxy_base(first_proxy) or first_proxy
         
         # ⚠️ Testar o PROXY BASE (sem Session ID) antes de aplicar Session ID
-        # Isto garante que a autenticação básica funciona
+        # Isto garante que a autenticação básica funciona.
         logger.info(f"🔍 Testando proxy base (sem Session ID) antes de aplicar Session ID...")
         if not self._test_proxy_ip_and_country(self.current_proxy_base):
-            logger.warning(f"⚠️ Proxy base falhou no teste, mas continuando mesmo assim...")
+            logger.warning(f"⚠️ Proxy base falhou no teste. Rotacionando para próximo proxy obrigatório...")
+            if len(self.proxies) > 1:
+                next_proxy = self._choose_next_proxy(exclude_current=True)
+                if not next_proxy:
+                    logger.error("❌ Não foi possível encontrar proxy válido após falha no teste de proxy base")
+                    raise Exception("Falha no teste de proxy base e nenhum proxy alternativo válido encontrado")
+                logger.info(f"✅ Proxy alternativo selecionado: {next_proxy}")
+            else:
+                logger.error("❌ Falha no teste de proxy base e não há proxies alternativos disponíveis")
+                raise Exception("Falha no teste de proxy base e não há proxies alternativos disponíveis")
 
         # Aplicar Session ID se habilitado
         if self.proxy_session_enabled:
@@ -1835,41 +1856,57 @@ class XATBrowserAutomation:
         logger.info(f"✅ Proxy inicial OBRIGATÓRIO selecionado: {self.current_proxy_base}")
 
     def _test_proxy_ip_and_country(self, proxy_str: str) -> bool:
-        """Testa se o proxy está funcionando e se o IP é brasileiro."""
+        """Testa se o proxy está funcionando com múltiplos endpoints de teste."""
         try:
             proxy_dict = self._build_proxy_dict(proxy_str)
             if not proxy_dict:
                 return False
 
-            # Teste com ipify para obter IP (timeout reduzido para falhas rápidas)
-            try:
-                response = requests.get(
-                    'https://api.ipify.org?format=json',
-                    proxies=proxy_dict,
-                    timeout=5,  # Timeout curto
-                    verify=False,
-                    headers={'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'}
-                )
-                if response.status_code != 200:
-                    logger.warning(f"⚠️ IP test falhou (status {response.status_code}): {proxy_str}")
-                    return False
-
-                ip_data = response.json()
-                ip = ip_data.get('ip', 'Desconhecido')
-                logger.info(f"🌍 IP detectado via proxy: {ip}")
-                
-            except requests.exceptions.Timeout:
-                logger.warning(f"⚠️ Timeout no teste de IP: {proxy_str}")
+            # 🔥 MELHORIA: Testar com múltiplos endpoints para máxima resiliência
+            # Se um endpoint falhar/timeout, tenta o próximo
+            ip_test_endpoints = [
+                ('https://httpbin.org/ip', 'ip'),              # httpbin é mais robusto
+                ('https://ifconfig.me/json', 'ip'),             # ifconfig como fallback
+                ('https://api.ipify.org?format=json', 'ip')     # ipify como último recurso
+            ]
+            
+            ip = None
+            for endpoint_url, ip_field in ip_test_endpoints:
+                try:
+                    response = requests.get(
+                        endpoint_url,
+                        proxies=proxy_dict,
+                        timeout=5,  # Timeout curto para falhar rápido
+                        verify=False,
+                        headers={'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'}
+                    )
+                    if response.status_code == 200:
+                        ip_data = response.json()
+                        ip = ip_data.get(ip_field, 'Desconhecido')
+                        logger.info(f"✅ IP obtido via {endpoint_url.split('/')[2]}: {ip}")
+                        break  # Sucesso - parar de tentar outros endpoints
+                    else:
+                        logger.debug(f"⚠️ Endpoint {endpoint_url} retornou status {response.status_code}")
+                        continue
+                except requests.exceptions.Timeout:
+                    logger.debug(f"⚠️ Timeout ao testar {endpoint_url}")
+                    continue
+                except requests.exceptions.ProxyError:
+                    logger.debug(f"⚠️ Erro de proxy ao testar {endpoint_url}")
+                    continue
+                except Exception as e:
+                    logger.debug(f"⚠️ Erro ao testar {endpoint_url}: {str(e)[:80]}")
+                    continue
+            
+            if not ip:
+                logger.warning(f"⚠️ Nenhum endpoint de IP conseguiu responder para {proxy_str}")
                 return False
-            except requests.exceptions.ProxyError as pe:
-                logger.warning(f"⚠️ Erro de proxy no teste de IP: {str(pe)[:100]}")
-                return False
-            except Exception as e:
-                logger.warning(f"⚠️ Erro ao obter IP: {str(e)[:100]}")
-                return False
+            
+            logger.info(f"🌍 IP detectado via proxy: {ip}")
 
             # Teste de país é OPCIONAL - falha silenciosa
-            # Se o proxy funciona, aceitamos mesmo que não seja Brasil
+            # Se o proxy funciona, aceitamos mesmo que não seja Brasil (por compatibilidade)
+            # O importante é que o proxy RESPONDEU a uma requisição
             try:
                 country_response = requests.get(
                     f'http://ip-api.com/json/{ip}',
@@ -2205,7 +2242,7 @@ class XATBrowserAutomation:
 
                 await self._clear_browser_context_identity()
                 page = await self.context.new_page()
-                page.set_default_timeout(self.config['browser_automation'].get('page_timeout', 30000))
+                page.set_default_timeout(self.config['browser_automation'].get('page_timeout', 90000))
 
                 # Passo 1: Obter UserID/k2 com retry de proxy em caso de bloqueio
                 user_data = None
@@ -2223,7 +2260,7 @@ class XATBrowserAutomation:
                         return False
                     proxy_inicial = self.current_proxy
                     page = await self.context.new_page()
-                    page.set_default_timeout(self.config['browser_automation'].get('page_timeout', 30000))
+                    page.set_default_timeout(self.config['browser_automation'].get('page_timeout', 90000))
 
                 user_id = user_data.get('UserId')
                 k2_token = user_data.get('k2')
@@ -2260,7 +2297,7 @@ class XATBrowserAutomation:
                         if not await self._rotate_proxy_and_recreate():
                             return False
                         page = await self.context.new_page()
-                        page.set_default_timeout(self.config['browser_automation'].get('page_timeout', 30000))
+                        page.set_default_timeout(self.config['browser_automation'].get('page_timeout', 90000))
                         continue
 
                     if login_success:
@@ -2274,7 +2311,7 @@ class XATBrowserAutomation:
                     if not await self._rotate_proxy_and_recreate():
                         return False
                     page = await self.context.new_page()
-                    page.set_default_timeout(self.config['browser_automation'].get('page_timeout', 30000))
+                    page.set_default_timeout(self.config['browser_automation'].get('page_timeout', 90000))
 
                 if not login_success:
                     await page.close()
@@ -2304,7 +2341,7 @@ class XATBrowserAutomation:
                         return False
                     proxy_inicial = self.current_proxy
                     page = await self.context.new_page()
-                    page.set_default_timeout(self.config['browser_automation'].get('page_timeout', 30000))
+                    page.set_default_timeout(self.config['browser_automation'].get('page_timeout', 90000))
                     if attempt > 0:
                         await self._clear_browser_context_identity()
                         logger.info("🔄 Obtendo novo UserID/k2 para nova tentativa após erro de captcha")
@@ -2559,12 +2596,21 @@ class XATBrowserAutomation:
 
             logger.info("🧍 Navegando para a página inicial antes de acessar /login para simular tráfego humano")
             try:
-                await page.goto(self.BASE_URL, wait_until='domcontentloaded', timeout=30000)
+                home_timeout = self.config['browser_automation'].get('home_timeout', 90000)
+                await page.goto(self.BASE_URL, wait_until='domcontentloaded', timeout=home_timeout)
                 await self._perform_pre_login_home_flow(page)
+            except CloudflareHardBlockException:
+                raise
             except Exception as e:
+                msg = str(e).lower()
+                if 'timeout' in msg or 'timed out' in msg:
+                    logger.warning(f"⚠️ Timeout ao visitar home antes do login: {e}")
+                    self.proxy_session_restart_pending = True
+                    raise CloudflareHardBlockException("Home timeout antes do login")
                 logger.warning(f"⚠️ Falha ao visitar home antes do login: {e}")
 
-            response = await page.goto(login_url, wait_until='networkidle', timeout=45000)
+            login_timeout = self.config['browser_automation'].get('login_timeout', 90000)
+            response = await page.goto(login_url, wait_until='networkidle', timeout=login_timeout)
 
             # Aguardar a página intersticial do Cloudflare sumir ("Checking your browser")
             logger.info("⏳ Aguardando 5s para página intersticial Cloudflare carregar/sumir...")
@@ -2785,10 +2831,11 @@ class XATBrowserAutomation:
             max_reload_attempts = 2
             widget_loaded = False
             
+            widget_timeout = self.config['browser_automation'].get('page_timeout', 90000)
             while widget_load_attempts < max_reload_attempts and not widget_loaded:
                 try:
-                    await page.wait_for_selector('iframe[src*="challenges.cloudflare.com"], iframe[src*="turnstile"], iframe[src*="captcha"]', timeout=30000)
-                    logger.info("✅ Widget Turnstile confirmado carregado após 30s")
+                    await page.wait_for_selector('iframe[src*="challenges.cloudflare.com"], iframe[src*="turnstile"], iframe[src*="captcha"]', timeout=widget_timeout)
+                    logger.info(f"✅ Widget Turnstile confirmado carregado após {widget_timeout}ms")
                     widget_loaded = True
                 except Exception as e:
                     widget_load_attempts += 1
@@ -2938,7 +2985,8 @@ class XATBrowserAutomation:
             if await self._detect_cloudflare_challenge(page, 'home inicial'):
                 logger.info("ℹ️ Página inicial abriu um Cloudflare challenge; aguardando e tentando novamente...")
                 await self._random_delay(page, 3000, 5200)
-                await page.reload(wait_until='networkidle', timeout=30000)
+                reload_timeout = self.config['browser_automation'].get('home_timeout', 90000)
+                await page.reload(wait_until='networkidle', timeout=reload_timeout)
                 await self._random_delay(page, 1600, 3200)
 
             await self._simulate_mouse_movement(page)

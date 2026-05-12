@@ -27,7 +27,9 @@
     "headless": true,
     "proxy_rotation": true,
     "captcha_timeout": 60,
-    "page_timeout": 30000,
+    "page_timeout": 90000,
+    "home_timeout": 90000,
+    "login_timeout": 90000,
     "max_proxy_retries": 3
   },
   "captcha_solver": {
