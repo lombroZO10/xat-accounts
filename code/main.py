@@ -2514,12 +2514,12 @@ class XATBrowserAutomation:
             # Upgrade Final: Clique Humanizado no Widget antes de enviar para 2Captcha
             logger.info("🖱️ Preparando clique humanizado no widget Turnstile...")
 
-            # Increase Search Time: Aguardar pelo menos 10 segundos para garantir carregamento completo
+            # Increase Search Time: Aguardar até 30 segundos para garantir carregamento completo do widget
             try:
-                await page.wait_for_selector('iframe[src*="challenges.cloudflare.com"], iframe[src*="turnstile"], iframe[src*="captcha"]', timeout=10000)
-                logger.info("✅ Widget Turnstile confirmado carregado após 10s")
+                await page.wait_for_selector('iframe[src*="challenges.cloudflare.com"], iframe[src*="turnstile"], iframe[src*="captcha"]', timeout=30000)
+                logger.info("✅ Widget Turnstile confirmado carregado após 30s")
             except Exception as e:
-                logger.warning(f"⚠️ Widget Turnstile não carregou em 10s: {e}. Continuando mesmo assim...")
+                logger.warning(f"⚠️ Widget Turnstile não carregou em 30s: {e}. Continuando mesmo assim...")
 
             if not await self._humanize_turnstile_click(page):
                 logger.warning("⚠️ Clique humanizado falhou, mas continuando mesmo assim...")
@@ -3589,76 +3589,6 @@ class XATBrowserAutomation:
                 });
 
                 const invokeCallback = (callbackName) => {
-                    if (!callbackName) return;
-                    const callback = window[callbackName];
-                    if (typeof callback === 'function') {
-                        try {
-                            callback(token);
-                            window.__playwright_turnstile_callback_fired = true;
-                        } catch (e) {
-                            window.__playwright_turnstile_callback_fired = true;
-                        }
-                    }
-                };
-
-                const invokeCallbackFunction = (callbackFn) => {
-                    if (typeof callbackFn !== 'function') return;
-                    try {
-                        callbackFn(token);
-                        window.__playwright_turnstile_callback_fired = true;
-                    } catch (e) {
-                        window.__playwright_turnstile_callback_fired = true;
-                    }
-                };
-
-                // ⚠️ Armazena token em múltiplas variáveis para compatibilidade máxima
-                window.cf_token = token;
-                window.turnstileToken = token;
-                window.grecaptchaResponse = token;
-                window.recaptchaResponse = token;
-                window.xatCaptchaToken = token;
-
-                // ⚠️ FEATURE 2: Notifica o xat via window.cf_callback() ANTES de qualquer outro evento
-                // Isto garante que o JavaScript do xat sabe que o token está pronto
-                if (typeof window.cf_callback === 'function') {
-                    try {
-                        window.cf_callback(token);
-                        console.log('[Playwright] cf_callback invocado com sucesso');
-                    } catch (e) {
-                        console.log('[Playwright] cf_callback falhou:', e);
-                    }
-                }
-
-                let cfCallbackInvoked = false;
-                // ⚠️ FEATURE 2: Notifica o xat via window.cf_callback() ANTES de qualquer outro evento
-                // Isto garante que o JavaScript do xat sabe que o token está pronto
-                if (typeof window.cf_callback === 'function') {
-                    try {
-                        window.cf_callback(token);
-                        cfCallbackInvoked = true;
-                        console.log('[Playwright] cf_callback invocado com sucesso');
-                    } catch (e) {
-                        cfCallbackInvoked = true;
-                        console.log('[Playwright] cf_callback falhou:', e);
-                    }
-                }
-
-                let dispatcherInvoked = false;
-                // Dispatcher de token do Playwright
-                if (typeof window.__playwright_dispatch_turnstile_token === 'function') {
-                    try {
-                        window.__playwright_dispatch_turnstile_token(token);
-                        dispatcherInvoked = true;
-                    } catch (e) {
-                        console.log('[Playwright] __playwright_dispatch_turnstile_token falhou:', e);
-                    }
-                }
-
-                let callbackCount = 0;
-                let callbackInvokedCount = 0;
-                const callbackNames = [];
-
-                const invokeCallback = (callbackName) => {
                     if (!callbackName) return false;
                     const callback = window[callbackName];
                     if (typeof callback === 'function') {
@@ -3695,6 +3625,31 @@ class XATBrowserAutomation:
                         return false;
                     }
                 };
+
+                // ⚠️ Armazena token em múltiplas variáveis para compatibilidade máxima
+                window.cf_token = token;
+                window.turnstileToken = token;
+                window.grecaptchaResponse = token;
+                window.recaptchaResponse = token;
+                window.xatCaptchaToken = token;
+
+                let cfCallbackInvoked = false;
+                // ⚠️ FEATURE 2: Notifica o xat via window.cf_callback() ANTES de qualquer outro evento
+                // Isto garante que o JavaScript do xat sabe que o token está pronto
+                if (typeof window.cf_callback === 'function') {
+                    try {
+                        window.cf_callback(token);
+                        cfCallbackInvoked = true;
+                        console.log('[Playwright] cf_callback invocado com sucesso');
+                    } catch (e) {
+                        cfCallbackInvoked = true;
+                        console.log('[Playwright] cf_callback falhou:', e);
+                    }
+                }
+
+                let callbackCount = 0;
+                let callbackInvokedCount = 0;
+                const callbackNames = [];
 
                 // Invoca callbacks de elementos que têm data-callback
                 document.querySelectorAll('[data-callback], [data-recaptcha-callback], [data-sitekey]').forEach(element => {
