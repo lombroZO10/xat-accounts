@@ -2512,7 +2512,15 @@ class XATBrowserAutomation:
             payload = await self._extract_turnstile_payload(page)
 
             # Upgrade Final: Clique Humanizado no Widget antes de enviar para 2Captcha
-            logger.info("🖱️ Executando clique humanizado no widget Turnstile...")
+            logger.info("🖱️ Preparando clique humanizado no widget Turnstile...")
+
+            # Increase Search Time: Aguardar pelo menos 10 segundos para garantir carregamento completo
+            try:
+                await page.wait_for_selector('iframe[src*="challenges.cloudflare.com"]', timeout=10000)
+                logger.info("✅ Widget Turnstile confirmado carregado após 10s")
+            except Exception as e:
+                logger.warning(f"⚠️ Widget Turnstile não carregou em 10s: {e}. Continuando mesmo assim...")
+
             if not await self._humanize_turnstile_click(page):
                 logger.warning("⚠️ Clique humanizado falhou, mas continuando mesmo assim...")
 
@@ -3618,6 +3626,27 @@ class XATBrowserAutomation:
                 // Callback de config do Turnstile
                 if (window.__cf_turnstile_config && window.__cf_turnstile_config.sitekey) {
                     invokeCallback(window.__cf_turnstile_config.callback || window.__cf_turnstile_config['data-callback']);
+                }
+
+                // 🔥 TRIGGER CALLBACK: Disparar manualmente callback do Turnstile
+                // Verificar atributo data-callback no widget e executar a função
+                const turnstileWidget = document.querySelector('[data-sitekey]');
+                if (turnstileWidget) {
+                    const callbackName = turnstileWidget.getAttribute('data-callback');
+                    if (callbackName) {
+                        console.log('[Playwright] Disparando callback do Turnstile:', callbackName);
+                        invokeCallback(callbackName);
+                    }
+                }
+
+                // 🔥 TRIGGER CALLBACK: Tentar executar turnstile.execute() se disponível
+                if (window.turnstile && typeof window.turnstile.execute === 'function') {
+                    try {
+                        console.log('[Playwright] Executando turnstile.execute()');
+                        window.turnstile.execute();
+                    } catch (e) {
+                        console.log('[Playwright] turnstile.execute() falhou:', e);
+                    }
                 }
 
                 // Não clicar no widget após injetar o token; a injeção + callback é o passo final antes do registro.
