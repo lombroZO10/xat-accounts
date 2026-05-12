@@ -3649,6 +3649,7 @@ class XATBrowserAutomation:
 
                 let callbackCount = 0;
                 let callbackInvokedCount = 0;
+                let dispatcherInvoked = false;
                 const callbackNames = [];
 
                 // Invoca callbacks de elementos que têm data-callback
@@ -3656,7 +3657,9 @@ class XATBrowserAutomation:
                     const callbackName = element.getAttribute('data-callback') || element.getAttribute('data-recaptcha-callback');
                     if (callbackName) {
                         console.log('[Playwright] Disparando callback do Turnstile:', callbackName);
-                        invokeCallback(callbackName);
+                        if (invokeCallback(callbackName)) {
+                            dispatcherInvoked = true;
+                        }
                     }
                 });
 
@@ -3665,10 +3668,14 @@ class XATBrowserAutomation:
                     const cfgCallback = window.__cf_turnstile_config.callback || window.__cf_turnstile_config['data-callback'];
                     if (typeof cfgCallback === 'function') {
                         console.log('[Playwright] Disparando callback de configuração do Turnstile');
-                        invokeCallbackFunction(cfgCallback);
+                        if (invokeCallbackFunction(cfgCallback)) {
+                            dispatcherInvoked = true;
+                        }
                     } else {
                         console.log('[Playwright] Disparando callback nomeado de configuração do Turnstile:', cfgCallback);
-                        invokeCallback(cfgCallback);
+                        if (invokeCallback(cfgCallback)) {
+                            dispatcherInvoked = true;
+                        }
                     }
                 }
 
