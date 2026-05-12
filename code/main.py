@@ -22,7 +22,7 @@ from datetime import datetime
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import List, Dict, Optional, Tuple, Set
-from urllib.parse import urljoin, parse_qs, urlencode, urlparse, urlsplit
+from urllib.parse import ParseResult, urljoin, parse_qs, urlencode, urlparse, urlsplit
 from bs4 import BeautifulSoup
 
 class ThreadedHTTPServer(ThreadingHTTPServer):
@@ -203,7 +203,8 @@ DEFAULT_CONFIG = {
         "rotacao": "por_requisicao",
         "health_check": False,
         "use_public_fallback": True,
-        "force_proxy": True  # Forçar uso de proxy em todas as requisições
+        "force_proxy": True,  # Forçar uso de proxy em todas as requisições
+        "use_session_ids": True
     },
     "browser_automation": {
         "enabled": True,
@@ -1456,11 +1457,16 @@ class XATBrowserAutomation:
         self.playwright = None
         self.browser = None
         self.context = None
+        self.current_proxy_base = None
         self.current_proxy = None
+        self.proxy_session_id = None
+        self.proxy_session_restart_pending = False
+        self.proxy_index = 0  # Índice para rastrear proxy atual
         self.local_proxy_server = None
         self.local_proxy_thread = None
         self.last_login_block_reason: Optional[str] = None
         self.last_captcha_block_reason: Optional[str] = None
+        self.proxy_session_enabled = self.config.get('proxy', {}).get('use_session_ids', True)
         self.user_agents = [
             # User-Agents atualizados para 2026 - compatíveis com IPs brasileiros
             "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36",
@@ -1489,6 +1495,15 @@ class XATBrowserAutomation:
         if not PLAYWRIGHT_AVAILABLE:
             raise ImportError("❌ Playwright não está instalado. Execute: pip install playwright playwright-stealth")
 
+        # 🔥 FORCE: Inicializar com o primeiro proxy da lista imediatamente
+        # Isso garante que NENHUMA requisição seja feita sem proxy
+        if self.proxies:
+            try:
+                self._select_first_paid_proxy()
+                logger.info(f"✅ Proxy inicial definido obrigatoriamente: {self.current_proxy}")
+            except Exception as e:
+                logger.warning(f"⚠️ Falha ao definir proxy inicial: {e}")
+
         logger.info("🎭 XAT Browser Automation inicializado")
 
     async def __aenter__(self):
@@ -1506,7 +1521,13 @@ class XATBrowserAutomation:
             max_attempts = len(self.proxies) if self.proxies else 3
 
             while attempt < max_attempts:
-                self._choose_next_proxy(exclude_current=(attempt > 0))
+                # 🔥 FORCE: Na primeira tentativa, usar o proxy já definido no __init__
+                # Nas tentativas seguintes, rotacionar para próximos proxies
+                if attempt == 0 and self.current_proxy:
+                    logger.info(f"ℹ️ Tentativa {attempt + 1}: Usando proxy inicial obrigatório já definido no __init__")
+                else:
+                    logger.info(f"ℹ️ Tentativa {attempt + 1}: Rotacionando para novo proxy...")
+                    self._choose_next_proxy(exclude_current=(attempt > 0))
                 
                 # Teste de IP/país antes de criar o contexto
                 if not self._test_proxy_ip_and_country(self.current_proxy):
@@ -1551,16 +1572,20 @@ class XATBrowserAutomation:
             logger.error("❌ Nenhum proxy disponível na lista. Não há fallback para Tor quando proxies SOCKS5 autenticados são usados.")
             return None
 
-        options = [p for p in self.proxies if p != self.current_proxy] if exclude_current else list(self.proxies)
+        current_base = self.current_proxy_base or self._normalize_proxy_base(self.current_proxy) or self.current_proxy
+        options = [p for p in self.proxies if p != current_base] if exclude_current else list(self.proxies)
         if not options:
             options = list(self.proxies)
 
         random.shuffle(options)  # Embaralhar para tentar diferentes proxies
 
         for proxy_candidate in options:
-            # Nota: Webshare é um rotating endpoint, não precisa de sufixo de sessão
             if self._validate_proxy_connectivity(proxy_candidate):
-                self.current_proxy = proxy_candidate
+                self.current_proxy_base = self._normalize_proxy_base(proxy_candidate) or proxy_candidate
+                if self.proxy_session_enabled:
+                    self._refresh_proxy_session(self.current_proxy_base)
+                else:
+                    self.current_proxy = self.current_proxy_base
                 proxy_display = self.current_proxy.replace('http://', '').replace('https://', '')
                 if '@' in proxy_display:
                     proxy_display = proxy_display.split('@', 1)[1]
@@ -1641,6 +1666,110 @@ class XATBrowserAutomation:
             'https': proxy_url
         }
 
+    def _parse_proxy_string(self, proxy_str: str) -> Optional[ParseResult]:
+        if not proxy_str:
+            return None
+
+        normalized = proxy_str.strip().rstrip('/')
+        if '://' not in normalized:
+            normalized = f'http://{normalized}'
+
+        try:
+            return urlparse(normalized)
+        except Exception:
+            return None
+
+    def _normalize_proxy_base(self, proxy_str: str) -> Optional[str]:
+        parsed = self._parse_proxy_string(proxy_str)
+        if not parsed or not parsed.hostname or not parsed.port:
+            return None
+
+        username = parsed.username or ''
+        password = parsed.password or ''
+        scheme = parsed.scheme or 'http'
+
+        # Remover session suffix antiga ao normalizar proxy base
+        username = re.sub(r'(-session-[A-Za-z0-9]+)$', '', username)
+
+        if username and password:
+            return f"{scheme}://{username}:{password}@{parsed.hostname}:{parsed.port}"
+        elif username:
+            return f"{scheme}://{username}@{parsed.hostname}:{parsed.port}"
+        return f"{scheme}://{parsed.hostname}:{parsed.port}"
+
+    def _generate_proxy_session_id(self) -> str:
+        return ''.join(random.choices(string.ascii_lowercase + string.digits, k=10))
+
+    def _proxy_supports_session(self, proxy_str: str) -> bool:
+        parsed = self._parse_proxy_string(proxy_str)
+        return bool(parsed and parsed.username and parsed.password)
+
+    def _apply_proxy_session(self, proxy_str: str, session_id: Optional[str] = None) -> str:
+        parsed = self._parse_proxy_string(proxy_str)
+        if not parsed or not parsed.hostname or not parsed.port:
+            return proxy_str
+
+        username = parsed.username or ''
+        password = parsed.password or ''
+        scheme = parsed.scheme or 'http'
+
+        if not username or not password:
+            return proxy_str
+
+        base_username = re.sub(r'(-session-[A-Za-z0-9]+)$', '', username)
+        session_id = session_id or self._generate_proxy_session_id()
+        proxy_username = f"{base_username}-session-{session_id}"
+
+        return f"{scheme}://{proxy_username}:{password}@{parsed.hostname}:{parsed.port}"
+
+    def _refresh_proxy_session(self, proxy_base: Optional[str] = None) -> Optional[str]:
+        if proxy_base:
+            normalized_base = self._normalize_proxy_base(proxy_base)
+            if normalized_base:
+                self.current_proxy_base = normalized_base
+        if not self.current_proxy_base:
+            return None
+
+        if not self._proxy_supports_session(self.current_proxy_base):
+            logger.warning("⚠️ Proxy atual não suporta Session ID. Mantendo proxy sem sessão personalizada.")
+            self.current_proxy = self.current_proxy_base
+            return self.current_proxy
+
+        self.proxy_session_id = self._generate_proxy_session_id()
+        self.current_proxy = self._apply_proxy_session(self.current_proxy_base, self.proxy_session_id)
+        session_suffix = self.proxy_session_id[-6:] if self.proxy_session_id else 'unknown'
+        masked = self.current_proxy
+        try:
+            if '@' in self.current_proxy:
+                parts = self.current_proxy.split('@')
+                masked = f"***@{parts[-1]}"
+        except Exception:
+            masked = self.current_proxy
+        logger.info(f"🔐 [Session ID: ...{session_suffix}] Proxy renovado: {masked}")
+        return self.current_proxy
+
+    async def _refresh_proxy_session_and_recreate(self) -> bool:
+        if self.current_proxy_base is None and self.proxies:
+            self.current_proxy_base = self.proxies[0]
+
+        if not self.current_proxy_base:
+            logger.error("❌ Nenhum proxy base disponível para renovar Session ID")
+            return False
+
+        self._refresh_proxy_session(self.current_proxy_base)
+        try:
+            await self._create_browser_context()
+            logger.info("🔄 Contexto recriado com novo Session ID de proxy")
+            return True
+        except Exception as e:
+            logger.error(f"❌ Falha ao recriar contexto com novo Session ID: {e}")
+            return False
+
+    def _current_proxy_for_blacklist(self) -> Optional[str]:
+        if self.proxy_session_enabled and self.current_proxy_base:
+            return self.current_proxy_base
+        return self.current_proxy
+
     def _validate_proxy_connectivity(self, proxy_str: str) -> bool:
         """Valida se o proxy responde a uma requisição rápida antes de abrir o navegador."""
         try:
@@ -1660,6 +1789,34 @@ class XATBrowserAutomation:
         except Exception as e:
             logger.warning(f"⚠️ Proxy {proxy_str} falhou na validação: {e}")
             return False
+
+    def _select_first_paid_proxy(self) -> None:
+        """
+        🔥 FORCE: Seleciona obrigatoriamente o primeiro proxy da lista de proxies pagos.
+        Garante que NENHUMA requisição é feita sem proxy no início.
+        """
+        if not self.proxies:
+            logger.error("❌ Nenhum proxy pago disponível!")
+            raise Exception("Nenhum proxy pago na lista")
+        
+        # Pegar o primeiro proxy da lista
+        first_proxy = self.proxies[0].strip()
+        self.current_proxy_base = self._normalize_proxy_base(first_proxy) or first_proxy
+        
+        # Tentar validar o proxy base
+        if not self._test_proxy_ip_and_country(self.current_proxy_base):
+            logger.warning(f"⚠️ Proxy inicial {self.current_proxy_base} falhou no teste, mas continuando mesmo assim...")
+
+        # Aplicar Session ID se habilitado
+        if self.proxy_session_enabled:
+            self._refresh_proxy_session(self.current_proxy_base)
+        else:
+            self.current_proxy = self.current_proxy_base
+
+        self.proxy_index = 0
+        
+        # Log com o IP brasileiro confirmado
+        logger.info(f"✅ Proxy inicial OBRIGATÓRIO selecionado: {self.current_proxy_base}")
 
     def _test_proxy_ip_and_country(self, proxy_str: str) -> bool:
         """Testa se o proxy está funcionando e se o IP é brasileiro."""
@@ -1890,7 +2047,13 @@ class XATBrowserAutomation:
         return sitekey in self.VALID_XAT_SITEKEYS
 
     async def _rotate_proxy_and_recreate(self) -> bool:
-        """Seleciona um novo proxy e recria o contexto do navegador."""
+        """Seleciona um novo proxy ou renova Session ID e recria o contexto do navegador."""
+        if self.proxy_session_enabled and self.current_proxy_base:
+            logger.info("🔄 Renovando Session ID do proxy atual em vez de trocar endpoint")
+            if not await self._refresh_proxy_session_and_recreate():
+                return False
+            return True
+
         if not self.proxies:
             logger.error("❌ Nenhum proxy disponível para rotacionar")
             return False
@@ -1906,21 +2069,22 @@ class XATBrowserAutomation:
 
     def _blacklist_current_proxy(self, reason: str) -> None:
         """Adiciona o proxy atual à blacklist e registra no log."""
-        if not self.current_proxy:
+        proxy_to_blacklist = self._current_proxy_for_blacklist()
+        if not proxy_to_blacklist:
             return
 
-        if self.current_proxy in self.bad_proxies:
+        if proxy_to_blacklist in self.bad_proxies:
             return
 
-        self.bad_proxies.add(self.current_proxy)
-        if self.current_proxy in self.proxies:
-            self.proxies.remove(self.current_proxy)
+        self.bad_proxies.add(proxy_to_blacklist)
+        if proxy_to_blacklist in self.proxies:
+            self.proxies.remove(proxy_to_blacklist)
 
         try:
             BAD_PROXIES_FILE.parent.mkdir(parents=True, exist_ok=True)
             with open(BAD_PROXIES_FILE, 'a', encoding='utf-8') as f:
-                f.write(f"{self.current_proxy}  # {reason}  [{datetime.now().isoformat()}]\n")
-            logger.warning(f"🚫 Proxy blacklistado: {self.current_proxy} ({reason})")
+                f.write(f"{proxy_to_blacklist}  # {reason}  [{datetime.now().isoformat()}]\n")
+            logger.warning(f"🚫 Proxy blacklistado: {proxy_to_blacklist} ({reason})")
         except Exception as e:
             logger.warning(f"⚠️ Não foi possível gravar bad_proxies.log: {e}")
 
@@ -1952,20 +2116,23 @@ class XATBrowserAutomation:
         
         texto_lower = texto_resposta.lower()
         detected_reasons = [kw for kw in shadowban_keywords if kw in texto_lower]
+        session_id_display = self.proxy_session_id[-6:] if self.proxy_session_id else 'N/A'
         
         if detected_reasons:
-            logger.warning(f"🚫 SHADOW BAN DETECTADO para {username}: {', '.join(detected_reasons)}")
+            logger.warning(f"🚫 [Session ID: ...{session_id_display}] SHADOW BAN DETECTADO para {username}: {', '.join(detected_reasons)}")
             self._log_shadowban(username, email, f"Indicadores: {', '.join(detected_reasons)}")
-            
-            # ⚠️ Blacklist o IP/proxy atual obrigatoriamente
-            if self.current_proxy:
-                self._blacklist_current_proxy(f"Shadow Ban detectado para {username} - indicadores: {', '.join(detected_reasons)}")
-                logger.info(f"🔄 Rotação de proxy OBRIGATÓRIA: IP será trocado antes do próximo username")
+            if self.proxy_session_enabled and self.current_proxy_base:
+                logger.info(f"🔄 [Session ID: ...{session_id_display}] Shadow Ban detectado. Renovando Session ID do proxy atual e reiniciando fluxo sem trocar endpoint.")
+                self.proxy_session_restart_pending = True
             else:
-                logger.warning(f"⚠️ Nenhum proxy atual para blacklistar (possível erro de estado)")
-            
-            # Resetar proxy para forçar rotação na próxima conta
-            self._set_current_proxy(None)
+                # ⚠️ Blacklist o IP/proxy atual obrigatoriamente
+                if self.current_proxy:
+                    self._blacklist_current_proxy(f"Shadow Ban detectado para {username} - indicadores: {', '.join(detected_reasons)}")
+                    logger.info(f"🔄 [Session ID: ...{session_id_display}] Rotação de proxy OBRIGATÓRIA: IP será trocado antes do próximo username")
+                else:
+                    logger.warning(f"⚠️ [Session ID: ...{session_id_display}] Nenhum proxy atual para blacklistar (possível erro de estado)")
+                # Resetar proxy para forçar rotação na próxima conta
+                self._set_current_proxy(None)
         else:
             # Outros motivos de falha - registrar para análise
             logger.debug(f"❌ Falha ao criar conta {username}, mas não foi detectado shadowban específico")
@@ -1973,190 +2140,239 @@ class XATBrowserAutomation:
     async def create_account(self, username: str, password: str, email: str) -> bool:
         """
         Cria conta XAT usando automação de navegador.
-        
+
         Segurança Sticky IP (IP Fixo por Sessão):
         - O proxy é definido UMA VEZ no início (self.current_proxy)
         - Mantém a mesma conexão TCP durante TODO o processo de registro
-        - Só rotaciona para novo IP se houver bloqueio Cloudflare ou erro crítico
-        - Garante que o token do Turnstile não fica inválido por troca de IP
+        - Só renova o Session ID se houver bloqueio Cloudflare, shadowban ou IP change
+        - Garante que o token do Turnstile não fica inválido por troca de IP durante o registro
         """
-        try:
-            # Guardar proxy inicial para validação de Sticky IP
-            proxy_inicial = self.current_proxy
-            logger.info(f"🎭 Iniciando criação de conta: {username} | {email}")
-            logger.info(f"🔒 Sticky IP ativado - Mantendo mesma sessão TCP durante todo o registro")
+        max_account_attempts = self.config['browser_automation'].get('max_proxy_retries', 3)
 
-            max_proxy_retries = self.config['browser_automation'].get('max_proxy_retries', 3)
-            await self._clear_browser_context_identity()
-            page = await self.context.new_page()
-            page.set_default_timeout(self.config['browser_automation'].get('page_timeout', 30000))
+        for account_attempt in range(max_account_attempts):
+            if account_attempt > 0 or self.proxy_session_restart_pending:
+                session_id_display = self.proxy_session_id[-6:] if self.proxy_session_id else 'unknown'
+                logger.info(f"🔄 [Session ID: ...{session_id_display}] Reiniciando fluxo da conta do zero com novo Session ID de proxy")
+                self.proxy_session_restart_pending = False
+                if self.proxy_session_enabled:
+                    if not await self._refresh_proxy_session_and_recreate():
+                        return False
+                else:
+                    if not await self._rotate_proxy_and_recreate():
+                        return False
 
-            # Passo 1: Obter UserID/k2 com retry de proxy em caso de bloqueio
-            user_data = None
-            for attempt in range(max_proxy_retries):
-                user_data = await self._get_user_data(page)
-                if user_data:
-                    break
+            try:
+                proxy_inicial = self.current_proxy
+                session_id_display = self.proxy_session_id[-6:] if self.proxy_session_id else 'N/A'
+                logger.info(f"🎭 [Session ID: ...{session_id_display}] Iniciando criação de conta: {username} | {email}")
+                logger.info(f"🔒 [Session ID: ...{session_id_display}] Sticky IP ativado - Mantendo mesma sessão TCP durante todo o registro")
 
-                logger.warning(f"⚠️ Falha ao obter UserID/k2 no attempt {attempt + 1}/{max_proxy_retries}")
-                await page.close()
-                if attempt == max_proxy_retries - 1:
-                    return False
-                if not await self._rotate_proxy_and_recreate():
-                    return False
+                await self._clear_browser_context_identity()
                 page = await self.context.new_page()
                 page.set_default_timeout(self.config['browser_automation'].get('page_timeout', 30000))
 
-            user_id = user_data.get('UserId')
-            k2_token = user_data.get('k2')
+                # Passo 1: Obter UserID/k2 com retry de proxy em caso de bloqueio
+                user_data = None
+                for attempt in range(max_account_attempts):
+                    user_data = await self._get_user_data(page)
+                    if user_data:
+                        break
 
-            await self._random_delay()
+                    session_id_display = self.proxy_session_id[-6:] if self.proxy_session_id else 'N/A'
+                    logger.warning(f"⚠️ [Session ID: ...{session_id_display}] Falha ao obter UserID/k2 no attempt {attempt + 1}/{max_account_attempts}")
+                    await page.close()
+                    if attempt == max_account_attempts - 1:
+                        return False
+                    if not await self._rotate_proxy_and_recreate():
+                        return False
+                    proxy_inicial = self.current_proxy
+                    page = await self.context.new_page()
+                    page.set_default_timeout(self.config['browser_automation'].get('page_timeout', 30000))
 
-            # Passo 2: Acessar página de login com retry de proxy ao detectar bloqueio ou shadowban
-            login_success = False
-            for attempt in range(max_proxy_retries):
-                try:
-                    if attempt > 0:
-                        await self._clear_browser_context_identity()
-                        logger.info("🔄 Obtendo novo UserID/k2 para nova tentativa de login")
-                        new_user_data = await self._get_user_data(page)
-                        if new_user_data and new_user_data.get('UserId'):
-                            user_id = new_user_data.get('UserId')
-                            if new_user_data.get('k2'):
-                                k2_token = new_user_data.get('k2')
-                            logger.info(f"✅ Novo UserID obtido para retry: {user_id}")
-                        else:
-                            logger.warning("⚠️ Falha ao obter novo UserID/k2 no retry; usando UserID anterior")
+                user_id = user_data.get('UserId')
+                k2_token = user_data.get('k2')
 
-                    login_success = await self._access_login_page(page, user_id, k2_token)
+                await self._random_delay()
+
+                # Passo 2: Acessar página de login com retry de proxy ao detectar bloqueio ou shadowban
+                login_success = False
+                for attempt in range(max_account_attempts):
+                    try:
+                        if attempt > 0:
+                            await self._clear_browser_context_identity()
+                            logger.info("🔄 Obtendo novo UserID/k2 para nova tentativa de login")
+                            new_user_data = await self._get_user_data(page)
+                            if new_user_data and new_user_data.get('UserId'):
+                                user_id = new_user_data.get('UserId')
+                                if new_user_data.get('k2'):
+                                    k2_token = new_user_data.get('k2')
+                                logger.info(f"✅ Novo UserID obtido para retry: {user_id}")
+                            else:
+                                logger.warning("⚠️ Falha ao obter novo UserID/k2 no retry; usando UserID anterior")
+
+                        login_success = await self._access_login_page(page, user_id, k2_token)
+                        if login_success:
+                            proxy_inicial = self.current_proxy
+                            break
+
+                    except CloudflareHardBlockException as e:
+                        logger.warning(f"🚫 Cloudflare Hard Block detectado: {e}")
+                        login_success = False
+                        await page.close()
+                        if attempt == max_account_attempts - 1:
+                            return False
+                        if not await self._rotate_proxy_and_recreate():
+                            return False
+                        page = await self.context.new_page()
+                        page.set_default_timeout(self.config['browser_automation'].get('page_timeout', 30000))
+                        continue
+
                     if login_success:
                         break
 
-                except CloudflareHardBlockException as e:
-                    logger.warning(f"🚫 Cloudflare Hard Block detectado: {e}")
-                    # Força rotação imediata de proxy
-                    login_success = False
+                    session_id_display = self.proxy_session_id[-6:] if self.proxy_session_id else 'N/A'
+                    logger.warning(f"⚠️ [Session ID: ...{session_id_display}] Bloqueio na página de login detectado no attempt {attempt + 1}/{max_account_attempts}")
                     await page.close()
-                    if attempt == max_proxy_retries - 1:
+                    if attempt == max_account_attempts - 1:
                         return False
                     if not await self._rotate_proxy_and_recreate():
                         return False
                     page = await self.context.new_page()
                     page.set_default_timeout(self.config['browser_automation'].get('page_timeout', 30000))
-                    continue  # Pula para próxima iteração do loop
 
-                if login_success:
-                    break
-
-                logger.warning(f"⚠️ Bloqueio na página de login detectado no attempt {attempt + 1}/{max_proxy_retries}")
-                await page.close()
-                if attempt == max_proxy_retries - 1:
+                if not login_success:
+                    await page.close()
                     return False
-                if not await self._rotate_proxy_and_recreate():
-                    return False
-                page = await self.context.new_page()
-                page.set_default_timeout(self.config['browser_automation'].get('page_timeout', 30000))
 
-            if not login_success:
-                return False
+                # Aguardar carregamento do widget e resolver captcha
+                captcha_resolved = False
+                for attempt in range(max_account_attempts):
+                    try:
+                        captcha_resolved = await self._wait_for_captcha_resolution(page)
+                        if captcha_resolved:
+                            break
+                    except CloudflareHardBlockException as e:
+                        session_id_display = self.proxy_session_id[-6:] if self.proxy_session_id else 'N/A'
+                        logger.warning(f"🚫 [Session ID: ...{session_id_display}] Cloudflare Hard Block detectado durante resolução de captcha: {e}")
+                        captcha_resolved = False
 
-            # Aguardar carregamento do widget e resolver captcha
-            captcha_resolved = False
-            for attempt in range(max_proxy_retries):
-                try:
-                    captcha_resolved = await self._wait_for_captcha_resolution(page)
                     if captcha_resolved:
                         break
-                except CloudflareHardBlockException as e:
-                    logger.warning(f"🚫 Cloudflare Hard Block detectado durante resolução de captcha: {e}")
-                    # Pular diretamente para próximo proxy sem tentar resolver captcha
-                    captcha_resolved = False
 
-                if captcha_resolved:
-                    break
-
-                logger.warning(f"⚠️ Widget de Turnstile não carregou ou captcha não foi resolvido no attempt {attempt + 1}/{max_proxy_retries}")
-                await page.close()
-                if attempt == max_proxy_retries - 1:
-                    return False
-                if not await self._rotate_proxy_and_recreate():
-                    return False
-                page = await self.context.new_page()
-                page.set_default_timeout(self.config['browser_automation'].get('page_timeout', 30000))
-                if attempt > 0:
-                    await self._clear_browser_context_identity()
-                    logger.info("🔄 Obtendo novo UserID/k2 para nova tentativa após erro de captcha")
-                    new_user_data = await self._get_user_data(page)
-                    if new_user_data and new_user_data.get('UserId'):
-                        user_id = new_user_data.get('UserId')
-                        if new_user_data.get('k2'):
-                            k2_token = new_user_data.get('k2')
-                        logger.info(f"✅ Novo UserID obtido após captcha fail: {user_id}")
-                    else:
-                        logger.warning("⚠️ Falha ao obter novo UserID/k2 após captcha fail; usando UserID anterior")
-                try:
-                    login_success = await self._access_login_page(page, user_id, k2_token)
-                    if not login_success:
-                        continue
-                except CloudflareHardBlockException as e:
-                    logger.warning(f"🚫 Cloudflare Hard Block detectado ao re-acessar login: {e}")
-                    continue
-
-            if not captcha_resolved:
-                reason = self.last_captcha_block_reason or "Falha na resolução do captcha"
-                logger.warning(f"⚠️ Captcha não resolvido. Abortando criação de conta. Motivo: {reason}")
-                await page.close()
-                return False
-
-            # Passo 3: Preencher e submeter formulário com loop de re-tentativa para captcha
-            registration_success = False
-            captcha_retry_attempts = 0
-            max_captcha_retries = 3
-
-            while captcha_retry_attempts < max_captcha_retries and not registration_success:
-                try:
-                    logger.info(f"📝 Tentativa de registro {captcha_retry_attempts + 1}/{max_captcha_retries}")
-                    success = await self._fill_registration_form(page, username, password, email, proxy_inicial)
-                    if success:
-                        registration_success = True
-                        break
-                    else:
-                        logger.warning(f"⚠️ Tentativa {captcha_retry_attempts + 1} falhou")
-                        captcha_retry_attempts += 1
-
-                except Exception as e:
-                    error_msg = str(e).lower()
-                    if 'captcha error detected' in error_msg or 'captcha' in error_msg:
-                        logger.warning(f"🚨 Erro de captcha detectado na tentativa {captcha_retry_attempts + 1}: {e}")
-                        if captcha_retry_attempts < max_captcha_retries - 1:
-                            # Aguardar antes de tentar novamente
-                            await page.wait_for_timeout(3000)
-                            captcha_retry_attempts += 1
-                            continue
+                    session_id_display = self.proxy_session_id[-6:] if self.proxy_session_id else 'N/A'
+                    logger.warning(f"⚠️ [Session ID: ...{session_id_display}] Widget de Turnstile não carregou ou captcha não foi resolvido no attempt {attempt + 1}/{max_account_attempts}")
+                    await page.close()
+                    if attempt == max_account_attempts - 1:
+                        return False
+                    if not await self._rotate_proxy_and_recreate():
+                        return False
+                    proxy_inicial = self.current_proxy
+                    page = await self.context.new_page()
+                    page.set_default_timeout(self.config['browser_automation'].get('page_timeout', 30000))
+                    if attempt > 0:
+                        await self._clear_browser_context_identity()
+                        logger.info("🔄 Obtendo novo UserID/k2 para nova tentativa após erro de captcha")
+                        new_user_data = await self._get_user_data(page)
+                        if new_user_data and new_user_data.get('UserId'):
+                            user_id = new_user_data.get('UserId')
+                            if new_user_data.get('k2'):
+                                k2_token = new_user_data.get('k2')
+                            logger.info(f"✅ Novo UserID obtido após captcha fail: {user_id}")
                         else:
-                            logger.error(f"❌ Máximo de {max_captcha_retries} tentativas de registro atingido devido a erro de captcha")
+                            logger.warning("⚠️ Falha ao obter novo UserID/k2 após captcha fail; usando UserID anterior")
+                    try:
+                        login_success = await self._access_login_page(page, user_id, k2_token)
+                        if login_success:
+                            proxy_inicial = self.current_proxy
+                        if not login_success:
+                            continue
+                    except CloudflareHardBlockException as e:
+                        logger.warning(f"🚫 Cloudflare Hard Block detectado ao re-acessar login: {e}")
+                        continue
+
+                if not captcha_resolved:
+                    session_id_display = self.proxy_session_id[-6:] if self.proxy_session_id else 'N/A'
+                    reason = self.last_captcha_block_reason or "Falha na resolução do captcha"
+                    logger.warning(f"⚠️ [Session ID: ...{session_id_display}] TURNSTILE TIMEOUT - Captcha não resolvido. Abortando criação de conta. Motivo: {reason}")
+                    await page.close()
+                    return False
+
+                # Passo 3: Preencher e submeter formulário com loop de re-tentativa para captcha
+                registration_success = False
+                captcha_retry_attempts = 0
+                max_captcha_retries = 3
+
+                while captcha_retry_attempts < max_captcha_retries and not registration_success:
+                    try:
+                        session_id_display = self.proxy_session_id[-6:] if self.proxy_session_id else 'N/A'
+                        logger.info(f"📝 [Session ID: ...{session_id_display}] Tentativa de registro {captcha_retry_attempts + 1}/{max_captcha_retries}")
+                        success = await self._fill_registration_form(page, username, password, email, proxy_inicial)
+                        if success:
+                            registration_success = True
+                            break
+                        else:
+                            logger.warning(f"⚠️ Tentativa {captcha_retry_attempts + 1} falhou")
+                            captcha_retry_attempts += 1
+
+                    except Exception as e:
+                        error_msg = str(e).lower()
+                        if 'sticky ip' in error_msg or 'proxy foi rotacionado' in error_msg:
+                            session_id_display = self.proxy_session_id[-6:] if self.proxy_session_id else 'N/A'
+                            logger.warning(f"🚨 [Session ID: ...{session_id_display}] Sticky IP detectado na tentativa {captcha_retry_attempts + 1}: {e}")
+                            if self.proxy_session_enabled:
+                                self.proxy_session_restart_pending = True
+                                await page.close()
+                                break
                             await page.close()
                             return False
-                    else:
-                        # Outro tipo de erro, não tentar novamente
-                        logger.error(f"❌ Erro não relacionado a captcha: {e}")
-                        await page.close()
-                        return False
+                        if 'captcha error detected' in error_msg or 'captcha' in error_msg:
+                            session_id_display = self.proxy_session_id[-6:] if self.proxy_session_id else 'N/A'
+                            logger.warning(f"🚨 [Session ID: ...{session_id_display}] Erro de captcha detectado na tentativa {captcha_retry_attempts + 1}: {e}")
+                            if captcha_retry_attempts < max_captcha_retries - 1:
+                                session_id_display = self.proxy_session_id[-6:] if self.proxy_session_id else 'N/A'
+                                logger.info(f"🔄 [Session ID: ...{session_id_display}] Aguardando 3s antes de re-tentar captcha...")
+                                await page.wait_for_timeout(3000)
+                                captcha_retry_attempts += 1
+                                continue
+                            else:
+                                session_id_display = self.proxy_session_id[-6:] if self.proxy_session_id else 'N/A'
+                                logger.error(f"❌ [Session ID: ...{session_id_display}] Máximo de {max_captcha_retries} tentativas de registro atingido devido a erro de captcha")
+                                await page.close()
+                                return False
+                        else:
+                            logger.error(f"❌ Erro não relacionado a captcha: {e}")
+                            await page.close()
+                            return False
 
-            if not registration_success:
-                logger.error("❌ Todas as tentativas de registro falharam")
+                if self.proxy_session_restart_pending:
+                    logger.info("🔄 Shadowban ou Sticky IP detectado. Reiniciando o fluxo da conta do zero.")
+                    await page.close()
+                    continue
+
+                if not registration_success:
+                    logger.error("❌ Todas as tentativas de registro falharam")
+                    await page.close()
+                    return False
+
+                # Passo 4: Verificar resultado
+                result = await self._verify_registration_result(page, username, email)
                 await page.close()
+
+                if result:
+                    return True
+                if self.proxy_session_restart_pending:
+                    session_id_display = self.proxy_session_id[-6:] if self.proxy_session_id else 'N/A'
+                    logger.info(f"🔄 [Session ID: ...{session_id_display}] Shadowban detectado após verificação. Reiniciando fluxo da conta do zero.")
+                    continue
+
                 return False
 
-            # Passo 4: Verificar resultado
-            result = await self._verify_registration_result(page, username, email)
-            await page.close()
+            except Exception as e:
+                logger.error(f"❌ Erro na automação: {e}")
+                return False
 
-            return result
-
-        except Exception as e:
-            logger.error(f"❌ Erro na automação: {e}")
-            return False
+        logger.error("❌ Todas as tentativas completas de criação de conta falharam")
+        return False
 
     async def _get_user_data(self, page: Page) -> Optional[Dict]:
         """Obtém UserID e k2 via auser3.php"""
@@ -2527,8 +2743,15 @@ class XATBrowserAutomation:
                 except Exception as e:
                     widget_load_attempts += 1
                     if widget_load_attempts >= max_reload_attempts:
-                        logger.warning(f"⚠️ Widget Turnstile não carregou em 30s (tentativa {widget_load_attempts}/{max_reload_attempts}): {e}. Continuando mesmo assim...")
-                        break
+                        reason = f"Turnstile iframe não apareceu após {max_reload_attempts * 30}s"
+                        logger.warning(f"⚠️ {reason}: {e}")
+                        self.last_captcha_block_reason = reason
+                        if self.proxy_session_enabled and self.current_proxy_base:
+                            self.proxy_session_restart_pending = True
+                            logger.info("🔄 Falha de widget. Renovando Session ID antes de tentar novamente.")
+                        else:
+                            self._blacklist_current_proxy(reason)
+                        return False
                     
                     # Estratégia: Recarregar página com novo User-Agent
                     logger.info(f"🔄 Estratégia de reload ativada (tentativa {widget_load_attempts}/{max_reload_attempts})")
@@ -4127,10 +4350,14 @@ class XATBrowserAutomation:
             else:
                 logger.warning(f"⚠️ Status da criação indefinido para: {username} - possivel shadowban")
                 self._log_shadowban(username, email, 'Status indefinido após submissão de registro')
-                # ⚠️ FEATURE 1: Forçar blacklist quando status é indefinido (pode ser shadowban silencioso)
-                if self.current_proxy:
-                    self._blacklist_current_proxy(f"Status indefinido para {username} - possível shadowban silencioso")
-                self._set_current_proxy(None)
+                if self.proxy_session_enabled and self.current_proxy_base:
+                    logger.info("🔄 Renewing proxy session due to undefined status instead of blacklisting base endpoint.")
+                    self.proxy_session_restart_pending = True
+                else:
+                    # ⚠️ FEATURE 1: Forçar blacklist quando status é indefinido (pode ser shadowban silencioso)
+                    if self.current_proxy:
+                        self._blacklist_current_proxy(f"Status indefinido para {username} - possível shadowban silencioso")
+                    self._set_current_proxy(None)
                 return False
 
         except Exception as e:
