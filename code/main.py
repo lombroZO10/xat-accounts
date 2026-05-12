@@ -1529,13 +1529,13 @@ class XATBrowserAutomation:
                     logger.info(f"ℹ️ Tentativa {attempt + 1}: Rotacionando para novo proxy...")
                     self._choose_next_proxy(exclude_current=(attempt > 0))
                 
-                # Teste de IP/país antes de criar o contexto
-                if not self._test_proxy_ip_and_country(self.current_proxy):
-                    logger.warning(f"⚠️ Proxy {self.current_proxy} falhou no teste de IP/país, tentando próximo...")
-                    attempt += 1
-                    if attempt >= max_attempts:
-                        raise Exception("❌ Nenhum proxy passou no teste de IP/país")
-                    continue
+                # ⚠️ Teste de IP/país é opcional - falha silenciosa na primeira tentativa
+                # Se falhar, ainda tenta criar o contexto (pode funcionar mesmo falhando no teste)
+                try:
+                    if not self._test_proxy_ip_and_country(self.current_proxy):
+                        logger.warning(f"⚠️ Proxy {self.current_proxy} falhou no teste de IP/país, mas continuando mesmo assim...")
+                except Exception as test_error:
+                    logger.warning(f"⚠️ Teste de IP/país falhou (continuando): {test_error}")
                 
                 try:
                     await self._create_browser_context()
@@ -1580,22 +1580,27 @@ class XATBrowserAutomation:
         random.shuffle(options)  # Embaralhar para tentar diferentes proxies
 
         for proxy_candidate in options:
-            if self._validate_proxy_connectivity(proxy_candidate):
-                self.current_proxy_base = self._normalize_proxy_base(proxy_candidate) or proxy_candidate
-                if self.proxy_session_enabled:
-                    self._refresh_proxy_session(self.current_proxy_base)
-                else:
-                    self.current_proxy = self.current_proxy_base
-                proxy_display = self.current_proxy.replace('http://', '').replace('https://', '')
-                if '@' in proxy_display:
-                    proxy_display = proxy_display.split('@', 1)[1]
-                logger.info(f"🌐 Proxy selecionado e validado: {proxy_display}")
-                if self.current_proxy.startswith('socks5://'):
-                    logger.info("✅ Proxy SOCKS5 selecionado")
-                return self.current_proxy
+            # ⚠️ Validar o PROXY BASE (sem Session ID) antes de aplicar Session ID
+            normalized_base = self._normalize_proxy_base(proxy_candidate)
+            if normalized_base and not self._validate_proxy_connectivity(normalized_base):
+                logger.warning(f"🚫 Proxy base {normalized_base} falhou na validação, tentando próximo...")
+                continue
+            
+            # Se proxy base passou, aplicar Session ID
+            self.current_proxy_base = normalized_base or proxy_candidate
+            if self.proxy_session_enabled:
+                self._refresh_proxy_session(self.current_proxy_base)
             else:
-                logger.warning(f"🚫 Proxy {proxy_candidate} falhou na validação, tentando próximo...")
-
+                self.current_proxy = self.current_proxy_base
+            
+            proxy_display = self.current_proxy.replace('http://', '').replace('https://', '')
+            if '@' in proxy_display:
+                proxy_display = proxy_display.split('@', 1)[1]
+            logger.info(f"🌐 Proxy selecionado e validado: {proxy_display}")
+            if self.current_proxy.startswith('socks5://'):
+                logger.info("✅ Proxy SOCKS5 selecionado")
+            return self.current_proxy
+        
         logger.error("❌ Nenhum proxy passou na validação de conectividade")
         return None
 
@@ -1777,17 +1782,28 @@ class XATBrowserAutomation:
             if not proxy_dict:
                 return False
 
-            # Teste rápido com httpbin.org/ip (timeout de 10s)
-            response = requests.get(
-                'https://httpbin.org/ip',
-                proxies=proxy_dict,
-                timeout=10,
-                verify=False,
-                headers={'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'}
-            )
-            return response.status_code == 200
+            # Teste rápido com httpbin.org/ip (timeout de 5s - mais curto para falhar rápido)
+            try:
+                response = requests.get(
+                    'https://httpbin.org/ip',
+                    proxies=proxy_dict,
+                    timeout=5,
+                    verify=False,
+                    headers={'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'}
+                )
+                return response.status_code == 200
+            except requests.exceptions.Timeout:
+                logger.debug(f"⚠️ Timeout na validação de conectividade: {proxy_str}")
+                return False
+            except requests.exceptions.ProxyError:
+                logger.debug(f"⚠️ Erro de proxy na validação: {proxy_str}")
+                return False
+            except Exception as e:
+                logger.debug(f"⚠️ Erro na validação: {str(e)[:80]}")
+                return False
+                
         except Exception as e:
-            logger.warning(f"⚠️ Proxy {proxy_str} falhou na validação: {e}")
+            logger.warning(f"⚠️ Proxy {proxy_str} falhou na validação: {str(e)[:80]}")
             return False
 
     def _select_first_paid_proxy(self) -> None:
@@ -1803,9 +1819,11 @@ class XATBrowserAutomation:
         first_proxy = self.proxies[0].strip()
         self.current_proxy_base = self._normalize_proxy_base(first_proxy) or first_proxy
         
-        # Tentar validar o proxy base
+        # ⚠️ Testar o PROXY BASE (sem Session ID) antes de aplicar Session ID
+        # Isto garante que a autenticação básica funciona
+        logger.info(f"🔍 Testando proxy base (sem Session ID) antes de aplicar Session ID...")
         if not self._test_proxy_ip_and_country(self.current_proxy_base):
-            logger.warning(f"⚠️ Proxy inicial {self.current_proxy_base} falhou no teste, mas continuando mesmo assim...")
+            logger.warning(f"⚠️ Proxy base falhou no teste, mas continuando mesmo assim...")
 
         # Aplicar Session ID se habilitado
         if self.proxy_session_enabled:
@@ -1825,26 +1843,39 @@ class XATBrowserAutomation:
             if not proxy_dict:
                 return False
 
-            # Teste com ipify para obter IP
-            response = requests.get(
-                'https://api.ipify.org?format=json',
-                proxies=proxy_dict,
-                timeout=10,
-                verify=False,
-                headers={'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'}
-            )
-            if response.status_code != 200:
-                return False
-
+            # Teste com ipify para obter IP (timeout reduzido para falhas rápidas)
             try:
+                response = requests.get(
+                    'https://api.ipify.org?format=json',
+                    proxies=proxy_dict,
+                    timeout=5,  # Timeout curto
+                    verify=False,
+                    headers={'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'}
+                )
+                if response.status_code != 200:
+                    logger.warning(f"⚠️ IP test falhou (status {response.status_code}): {proxy_str}")
+                    return False
+
                 ip_data = response.json()
                 ip = ip_data.get('ip', 'Desconhecido')
                 logger.info(f"🌍 IP detectado via proxy: {ip}")
                 
-                # Teste com ip-api.com para obter país (limite: 45 requisições por minuto)
+            except requests.exceptions.Timeout:
+                logger.warning(f"⚠️ Timeout no teste de IP: {proxy_str}")
+                return False
+            except requests.exceptions.ProxyError as pe:
+                logger.warning(f"⚠️ Erro de proxy no teste de IP: {str(pe)[:100]}")
+                return False
+            except Exception as e:
+                logger.warning(f"⚠️ Erro ao obter IP: {str(e)[:100]}")
+                return False
+
+            # Teste de país é OPCIONAL - falha silenciosa
+            # Se o proxy funciona, aceitamos mesmo que não seja Brasil
+            try:
                 country_response = requests.get(
                     f'http://ip-api.com/json/{ip}',
-                    timeout=10,
+                    timeout=5,
                     verify=False,
                     headers={'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'}
                 )
@@ -1859,16 +1890,18 @@ class XATBrowserAutomation:
                         logger.info(f"✅ IP brasileiro confirmado: {ip}")
                         return True
                     else:
-                        logger.warning(f"⚠️ IP não é brasileiro. País detectado: {country} ({country_code})")
-                        return False
+                        # ⚠️ Não é Brasil, mas proxy funciona - retornar True mesmo assim
+                        logger.warning(f"⚠️ IP não é brasileiro. País detectado: {country} ({country_code}), mas proxy funciona OK")
+                        return True
                 else:
-                    logger.warning(f"⚠️ Não foi possível obter informações do país para {ip}")
-                    return True  # Mesmo sem confirmar país, proxy funciona
+                    logger.warning(f"⚠️ Country lookup falhou (status {country_response.status_code}), mas IP test passou")
+                    return True  # Proxy funciona mesmo que país falhe
             except Exception as e:
-                logger.warning(f"⚠️ Erro ao processar resposta de IP: {e}")
-                return True
+                logger.debug(f"⚠️ Erro ao verificar país (continuando): {str(e)[:100]}")
+                return True  # Proxy funciona mesmo que país falhe
+        
         except Exception as e:
-            logger.warning(f"⚠️ Proxy {proxy_str} falhou no teste de IP/país: {e}")
+            logger.warning(f"⚠️ Proxy {proxy_str} falhou no teste geral: {str(e)[:100]}")
             return False
 
     def _start_local_http_proxy(self, upstream_proxy: Dict[str, str]) -> Optional[Dict[str, str]]:
