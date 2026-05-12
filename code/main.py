@@ -2516,7 +2516,7 @@ class XATBrowserAutomation:
 
             # Increase Search Time: Aguardar pelo menos 10 segundos para garantir carregamento completo
             try:
-                await page.wait_for_selector('iframe[src*="challenges.cloudflare.com"]', timeout=10000)
+                await page.wait_for_selector('iframe[src*="challenges.cloudflare.com"], iframe[src*="turnstile"], iframe[src*="captcha"]', timeout=10000)
                 logger.info("✅ Widget Turnstile confirmado carregado após 10s")
             except Exception as e:
                 logger.warning(f"⚠️ Widget Turnstile não carregou em 10s: {e}. Continuando mesmo assim...")
@@ -2878,7 +2878,7 @@ class XATBrowserAutomation:
                 logger.info("⏳ Aguardando processamento do token injetado...")
 
                 # 2. Safety Gate: Validar sucesso do captcha por até 20 segundos
-                if await self._validate_captcha_success(page, timeout_seconds=20):
+                if await self._validate_captcha_success(page, timeout_seconds=30):
                     logger.info("✅ Captcha validado com sucesso - prosseguindo para submissão")
                     captcha_success = True
                 else:
@@ -3419,7 +3419,7 @@ class XATBrowserAutomation:
             'sec-ch-ua-platform': platform
         }
 
-    async def _validate_captcha_success(self, page: Page, timeout_seconds: int = 20) -> bool:
+    async def _validate_captcha_success(self, page: Page, timeout_seconds: int = 30) -> bool:
         """
         Safety Gate: Valida visualmente se o Turnstile foi resolvido com sucesso.
         Verifica se cf-turnstile-response tem valor longo e se há indicador visual de sucesso.
@@ -3448,12 +3448,10 @@ class XATBrowserAutomation:
                                 try {
                                     const iframeDoc = iframe.contentDocument || iframe.contentWindow.document;
                                     if (iframeDoc) {
-                                        // Procurar por elementos que indiquem sucesso
                                         const successElements = iframeDoc.querySelectorAll('[class*="success"], [class*="checkmark"], .checkmark, [data-success]');
                                         if (successElements.length > 0) {
                                             return true;
                                         }
-                                        // Verificar se há texto indicando sucesso
                                         const textContent = iframeDoc.body ? iframeDoc.body.textContent : '';
                                         if (textContent.includes('success') || textContent.includes('verified') || textContent.includes('✓')) {
                                             return true;
@@ -3470,13 +3468,19 @@ class XATBrowserAutomation:
                     if success_indicator:
                         logger.info("✅ Safety Gate: Indicador visual de sucesso detectado no Turnstile")
                         return True
-                    else:
-                        logger.debug("⏳ Safety Gate: Token presente mas aguardando indicador visual...")
+
+                    callback_fired = await page.evaluate("""
+                        () => {
+                            return !!window.__playwright_turnstile_callback_fired;
+                        }
+                    """)
+                    if callback_fired:
+                        logger.info("✅ Safety Gate: Callback do Turnstile foi disparado com sucesso")
+                        return True
+
+                    logger.debug("⏳ Safety Gate: Token presente mas aguardando indicador visual ou callback...")
                 else:
                     logger.debug("⏳ Safety Gate: Aguardando token no campo cf-turnstile-response...")
-
-                await page.wait_for_timeout(1000)  # Verificar a cada 1 segundo
-
             except Exception as e:
                 logger.debug(f"⏳ Safety Gate: Erro na validação (continuando): {e}")
                 await page.wait_for_timeout(1000)
@@ -3494,7 +3498,7 @@ class XATBrowserAutomation:
             # Obter bounding box do widget Turnstile
             bbox = await page.evaluate("""
                 () => {
-                    const iframe = document.querySelector('iframe[src*="challenges.cloudflare.com"]');
+                    const iframe = document.querySelector('iframe[src*="challenges.cloudflare.com"], iframe[src*="turnstile"], iframe[src*="captcha"]');
                     if (iframe) {
                         const rect = iframe.getBoundingClientRect();
                         return {
@@ -3554,6 +3558,8 @@ class XATBrowserAutomation:
         await page.evaluate(
             """
             (token) => {
+                window.__playwright_turnstile_callback_fired = false;
+
                 const dispatchChange = (element) => {
                     if (!element) return;
                     element.value = token;
@@ -3588,7 +3594,20 @@ class XATBrowserAutomation:
                     if (typeof callback === 'function') {
                         try {
                             callback(token);
-                        } catch (e) {}
+                            window.__playwright_turnstile_callback_fired = true;
+                        } catch (e) {
+                            window.__playwright_turnstile_callback_fired = true;
+                        }
+                    }
+                };
+
+                const invokeCallbackFunction = (callbackFn) => {
+                    if (typeof callbackFn !== 'function') return;
+                    try {
+                        callbackFn(token);
+                        window.__playwright_turnstile_callback_fired = true;
+                    } catch (e) {
+                        window.__playwright_turnstile_callback_fired = true;
                     }
                 };
 
@@ -3625,18 +3644,30 @@ class XATBrowserAutomation:
 
                 // Callback de config do Turnstile
                 if (window.__cf_turnstile_config && window.__cf_turnstile_config.sitekey) {
-                    invokeCallback(window.__cf_turnstile_config.callback || window.__cf_turnstile_config['data-callback']);
+                    const cfgCallback = window.__cf_turnstile_config.callback || window.__cf_turnstile_config['data-callback'];
+                    if (typeof cfgCallback === 'function') {
+                        console.log('[Playwright] Disparando callback de configuração do Turnstile');
+                        invokeCallbackFunction(cfgCallback);
+                    } else {
+                        console.log('[Playwright] Disparando callback nomeado de configuração do Turnstile:', cfgCallback);
+                        invokeCallback(cfgCallback);
+                    }
                 }
 
-                // 🔥 TRIGGER CALLBACK: Disparar manualmente callback do Turnstile
-                // Verificar atributo data-callback no widget e executar a função
-                const turnstileWidget = document.querySelector('[data-sitekey]');
-                if (turnstileWidget) {
-                    const callbackName = turnstileWidget.getAttribute('data-callback');
+                // 🔥 TRIGGER CALLBACK: Disparar manualmente callbacks do Turnstile a partir de atributos data-callback
+                const callbackElements = Array.from(document.querySelectorAll('[data-callback], [data-recaptcha-callback], [data-sitekey]'));
+                const callbackNames = [];
+                callbackElements.forEach(element => {
+                    const callbackName = element.getAttribute('data-callback') || element.getAttribute('data-recaptcha-callback');
                     if (callbackName) {
+                        callbackNames.push(callbackName);
                         console.log('[Playwright] Disparando callback do Turnstile:', callbackName);
                         invokeCallback(callbackName);
                     }
+                });
+
+                if (callbackNames.length === 0) {
+                    console.log('[Playwright] Nenhum callback data-callback encontrado no Turnstile');
                 }
 
                 // 🔥 TRIGGER CALLBACK: Tentar executar turnstile.execute() se disponível
@@ -3644,6 +3675,7 @@ class XATBrowserAutomation:
                     try {
                         console.log('[Playwright] Executando turnstile.execute()');
                         window.turnstile.execute();
+                        window.__playwright_turnstile_callback_fired = true;
                     } catch (e) {
                         console.log('[Playwright] turnstile.execute() falhou:', e);
                     }
