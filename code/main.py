@@ -1541,7 +1541,7 @@ class XATBrowserAutomation:
                         logger.warning(f"⚠️ Proxy {self.current_proxy} falhou no teste de IP/país. Tentando criar contexto direto como fallback antes de rotacionar...")
                         try:
                             await self._create_browser_context()
-                            logger.info("✅ Contexto criado com o último Session ID mesmo sem teste de IP bem-sucedido")
+                            logger.info("✅ Contexto criado com o proxy atual mesmo sem teste de IP bem-sucedido")
                             return
                         except Exception as fallback_error:
                             logger.warning(f"⚠️ Fallback direto falhou: {fallback_error}")
@@ -1766,6 +1766,7 @@ class XATBrowserAutomation:
 
         if not self._proxy_supports_session(self.current_proxy_base):
             logger.warning("⚠️ Proxy atual não suporta Session ID. Mantendo proxy sem sessão personalizada.")
+            self.proxy_session_id = None
             self.current_proxy = self.current_proxy_base
             return self.current_proxy
 
@@ -1794,6 +1795,7 @@ class XATBrowserAutomation:
 
         if not self._proxy_supports_session(self.current_proxy_base):
             logger.warning("⚠️ Proxy atual não suporta Session ID. Mantendo proxy sem sessão personalizada.")
+            self.proxy_session_id = None
             self.current_proxy = self.current_proxy_base
             return True
 
@@ -1810,6 +1812,7 @@ class XATBrowserAutomation:
         logger.warning(
             f"⚠️ Todas as {max_retries} tentativas de Session ID falharam para proxy {self.current_proxy_base}. Último erro: {self.last_proxy_test_error}"
         )
+        self.proxy_session_id = None
         self.current_proxy = self.current_proxy_base
         logger.warning("⚠️ Usando proxy base sem Session ID como fallback para manter o fluxo.")
         return False
@@ -1822,10 +1825,16 @@ class XATBrowserAutomation:
             logger.error("❌ Nenhum proxy base disponível para renovar Session ID")
             return False
 
-        self._refresh_proxy_session(self.current_proxy_base)
+        session_ok = self._refresh_proxy_session_with_retries(self.current_proxy_base, max_retries=3, timeout=15)
+        if not session_ok:
+            logger.warning("⚠️ Não foi possível gerar um Session ID válido. Recriando contexto usando proxy base sem Session ID.")
+
         try:
             await self._create_browser_context()
-            logger.info("🔄 Contexto recriado com novo Session ID de proxy")
+            if session_ok:
+                logger.info("🔄 Contexto recriado com novo Session ID de proxy")
+            else:
+                logger.info("🔄 Contexto recriado usando proxy base sem Session ID")
             return True
         except Exception as e:
             logger.error(f"❌ Falha ao recriar contexto com novo Session ID: {e}")
@@ -1845,13 +1854,15 @@ class XATBrowserAutomation:
 
             # Teste rápido com httpbin.org/ip (timeout de 15s para proxies residenciais)
             try:
-                response = requests.get(
-                    'http://httpbin.org/ip',
-                    proxies=proxy_dict,
-                    timeout=15,
-                    verify=False,
-                    headers={'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'}
-                )
+                with requests.Session() as session:
+                    session.trust_env = False
+                    response = session.get(
+                        'http://httpbin.org/ip',
+                        proxies=proxy_dict,
+                        timeout=15,
+                        verify=False,
+                        headers={'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'}
+                    )
                 return response.status_code == 200
             except requests.exceptions.Timeout:
                 logger.debug(f"⚠️ Timeout na validação de conectividade: {proxy_str}")
@@ -1903,8 +1914,10 @@ class XATBrowserAutomation:
             logger.info(f"🔄 Renovando Session ID para proxy base: {self.current_proxy_base}")
             session_ok = self._refresh_proxy_session_with_retries(self.current_proxy_base, max_retries=3, timeout=15)
             if not session_ok:
+                self.proxy_session_id = None
+                self.current_proxy = self.current_proxy_base
                 logger.warning(
-                    "⚠️ Proxy base passou no teste, mas todos os Session IDs falharam. Continuando com o último Session ID gerado como fallback."
+                    "⚠️ Proxy base passou no teste, mas todos os Session IDs falharam. Continuando com o proxy base sem Session ID como fallback."
                 )
             else:
                 logger.info(f"✅ Proxy com Session ID definido: {self.current_proxy}")
@@ -1945,13 +1958,15 @@ class XATBrowserAutomation:
                 try:
                     endpoint_name = endpoint_url.split('/')[2]
                     logger.debug(f"🔗 Testando endpoint: {endpoint_url}")
-                    response = requests.get(
-                        endpoint_url,
-                        proxies=proxy_dict,
-                        timeout=timeout,
-                        verify=False,
-                        headers={'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'}
-                    )
+                    with requests.Session() as session:
+                        session.trust_env = False
+                        response = session.get(
+                            endpoint_url,
+                            proxies=proxy_dict,
+                            timeout=timeout,
+                            verify=False,
+                            headers={'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'}
+                        )
                     if response.status_code == 200:
                         ip_data = response.json()
                         logger.debug(f"📊 Resposta JSON de {endpoint_url}: {ip_data}")
@@ -1968,6 +1983,7 @@ class XATBrowserAutomation:
                             continue
                     else:
                         logger.debug(f"⚠️ Endpoint {endpoint_url} retornou status {response.status_code}")
+                        logger.debug(f"📄 Corpo de resposta de {endpoint_url}: {response.text[:200]}")
                         endpoint_errors.append(f"{endpoint_name}: status {response.status_code}")
                         continue
                 except requests.exceptions.Timeout as te:
@@ -2004,12 +2020,14 @@ class XATBrowserAutomation:
             # Se o proxy funciona, aceitamos mesmo que não seja Brasil (por compatibilidade)
             # O importante é que o proxy RESPONDEU a uma requisição com IP válido
             try:
-                country_response = requests.get(
-                    f'http://ip-api.com/json/{ip}',
-                    timeout=5,
-                    verify=False,
-                    headers={'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'}
-                )
+                with requests.Session() as session:
+                    session.trust_env = False
+                    country_response = session.get(
+                        f'http://ip-api.com/json/{ip}',
+                        timeout=5,
+                        verify=False,
+                        headers={'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'}
+                    )
                 if country_response.status_code == 200:
                     country_data = country_response.json()
                     country = country_data.get('country', 'Desconhecido')
@@ -3026,10 +3044,19 @@ class XATBrowserAutomation:
         except Exception as e:
             logger.debug(f"⚠️ Falha ao simular interação humana: {e}")
 
-    async def _random_delay(self, page: Page, min_ms: int = 900, max_ms: int = 2500) -> None:
-        """Espera um tempo aleatório para simular comportamento humano."""
+    async def _random_delay(self, page: Optional[Page] = None, min_ms: int = 900, max_ms: int = 2500) -> None:
+        """Espera um tempo aleatório para simular comportamento humano.
+
+        Se um objeto Page for passado, usa wait_for_timeout em milissegundos.
+        Caso contrário, aguarda com asyncio.sleep em segundos.
+        """
         delay = int(random.uniform(min_ms, max_ms))
-        await page.wait_for_timeout(delay)
+        if page is not None:
+            await page.wait_for_timeout(delay)
+        else:
+            seconds = delay / 1000.0
+            logger.info(f"⏳ Aguardando {seconds:.1f}s...")
+            await asyncio.sleep(seconds)
 
     async def _simulate_mouse_movement(self, page: Page) -> None:
         """Simula movimento de mouse aleatório para despertar o Turnstile."""
@@ -4708,13 +4735,6 @@ class XATBrowserAutomation:
             logger.warning(f"⚠️ Falha ao monitorar submissão: {e}")
             return None
 
-    async def _random_delay(self):
-        """Aguarda delay aleatório entre ações"""
-        min_delay = self.config['delays'].get('min_entre_requisicoes', 5)
-        max_delay = self.config['delays'].get('max_entre_requisicoes', 15)
-        delay = random.uniform(min_delay, max_delay)
-        logger.info(f"⏳ Aguardando {delay:.1f}s...")
-        await asyncio.sleep(delay)
 
 
 def main():
