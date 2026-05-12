@@ -2514,12 +2514,61 @@ class XATBrowserAutomation:
             # Upgrade Final: Clique Humanizado no Widget antes de enviar para 2Captcha
             logger.info("🖱️ Preparando clique humanizado no widget Turnstile...")
 
-            # Increase Search Time: Aguardar até 30 segundos para garantir carregamento completo do widget
-            try:
-                await page.wait_for_selector('iframe[src*="challenges.cloudflare.com"], iframe[src*="turnstile"], iframe[src*="captcha"]', timeout=30000)
-                logger.info("✅ Widget Turnstile confirmado carregado após 30s")
-            except Exception as e:
-                logger.warning(f"⚠️ Widget Turnstile não carregou em 30s: {e}. Continuando mesmo assim...")
+            # 🔥 AUTO-RELOAD INTELIGENTE: Se widget não carregar, recarregar página com User-Agent alternativo
+            widget_load_attempts = 0
+            max_reload_attempts = 2
+            widget_loaded = False
+            
+            while widget_load_attempts < max_reload_attempts and not widget_loaded:
+                try:
+                    await page.wait_for_selector('iframe[src*="challenges.cloudflare.com"], iframe[src*="turnstile"], iframe[src*="captcha"]', timeout=30000)
+                    logger.info("✅ Widget Turnstile confirmado carregado após 30s")
+                    widget_loaded = True
+                except Exception as e:
+                    widget_load_attempts += 1
+                    if widget_load_attempts >= max_reload_attempts:
+                        logger.warning(f"⚠️ Widget Turnstile não carregou em 30s (tentativa {widget_load_attempts}/{max_reload_attempts}): {e}. Continuando mesmo assim...")
+                        break
+                    
+                    # Estratégia: Recarregar página com novo User-Agent
+                    logger.info(f"🔄 Estratégia de reload ativada (tentativa {widget_load_attempts}/{max_reload_attempts})")
+                    
+                    # Rotacionar User-Agent
+                    user_agents = [
+                        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36",
+                        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/90.0.4430.85 Safari/537.36",
+                        "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:89.0) Gecko/20100101 Firefox/89.0",
+                        "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36",
+                        "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36"
+                    ]
+                    
+                    new_user_agent = random.choice(user_agents)
+                    logger.info(f"🔧 User-Agent rotacionado para: {new_user_agent[:60]}...")
+                    
+                    # Recarregar com novo User-Agent
+                    try:
+                        await page.context.add_init_script(f"""
+                            Object.defineProperty(navigator, 'userAgent', {{
+                                get() {{ return '{new_user_agent}'; }}
+                            }});
+                        """)
+                        logger.info("🔄 Recarregando página com novo User-Agent...")
+                        await page.reload(wait_until='networkidle')
+                        logger.info("✅ Página recarregada com sucesso")
+                        
+                        # Re-extrair sitekey após reload
+                        sitekey = await self._extract_sitekey_from_full_page_content(page)
+                        if not sitekey:
+                            logger.warning("⚠️ Sitekey não encontrada após reload")
+                            continue
+                        
+                        # Simular interação humana novamente
+                        await self._simulate_human_interaction(page)
+                        await page.wait_for_load_state('networkidle', timeout=wait_timeout)
+                        
+                    except Exception as reload_error:
+                        logger.warning(f"⚠️ Falha ao recarregar página: {reload_error}. Continuando com página atual...")
+                        break
 
             if not await self._humanize_turnstile_click(page):
                 logger.warning("⚠️ Clique humanizado falhou, mas continuando mesmo assim...")
@@ -2970,7 +3019,7 @@ class XATBrowserAutomation:
 
             logger.info("✅ Aguarde concluído; enviando o registro imediatamente a seguir")
 
-            # Clicar no botão de submit (é um <a>, não <button>)
+            # 🔥 FORCE SUBMIT INTELIGENTE - Múltiplas estratégias de fallback
             submit_found = False
             submit_selectors = [
                 'a#butregister',  # Link de submit (ID real do XAT)
@@ -2981,54 +3030,136 @@ class XATBrowserAutomation:
                 '.submit-btn'
             ]
             
+            # Estratégia 1: Remover atributos disabled e preparar o botão
+            logger.info("🔧 Estratégia 1: Preparando botão - removendo atributo disabled...")
+            try:
+                await page.evaluate("""
+                    () => {
+                        document.querySelectorAll('button, input[type="submit"], a').forEach(el => {
+                            if (el.hasAttribute('disabled')) {
+                                el.removeAttribute('disabled');
+                                console.log('[Playwright] Atributo disabled removido de:', el.tagName, el.id, el.className);
+                            }
+                        });
+                    }
+                """)
+                logger.info("✅ Atributos disabled removidos de todos os botões possíveis")
+            except Exception as e:
+                logger.debug(f"⚠️ Falha ao remover disabled: {e}")
+            
+            # Estratégia 2: Tentar clicar via múltiplas formas
             for selector in submit_selectors:
                 try:
                     button = page.locator(selector).first
                     if await button.count() > 0:
                         logger.info(f"✅ Botão de submit encontrado: {selector}")
-                        # ⚠️ FEATURE: Usar coordenadas do mouse em vez de page.click()
-                        # Isso simula um clique mais humano e pode ajudar com detecção anti-bot
-                        if await self._click_element_with_mouse_coordinates(page, selector):
-                            logger.info(f"✅ Botão de submit clicado via coordenadas do mouse: {selector}")
-                        else:
-                            # Fallback para clique normal se coordenadas falharem
-                            logger.warning(f"⚠️ Clique via coordenadas falhou para {selector}, tentando clique normal...")
-                            try:
-                                await button.click()
-                            except Exception as click_error:
-                                logger.warning(f"⚠️ Clique normal falhou para {selector}: {click_error}. Tentando JS .click()")
-                                try:
-                                    await page.evaluate(f'document.querySelector("{selector}")?.click()')
-                                    logger.info(f"✅ Clique JS executado em {selector}")
-                                except Exception as js_click_error:
-                                    logger.warning(f"⚠️ Clique JS falhou para {selector}: {js_click_error}")
-                                    raise
-                        submit_found = True
-                        break
+                        
+                        # Método A: Coordenadas do mouse (mais humanizado)
+                        try:
+                            if await self._click_element_with_mouse_coordinates(page, selector):
+                                logger.info(f"✅ Botão clicado via coordenadas do mouse: {selector}")
+                                submit_found = True
+                                break
+                        except Exception as e:
+                            logger.debug(f"  Coordenadas falhou: {e}")
+                        
+                        # Método B: Clique normal do Playwright
+                        try:
+                            await button.click()
+                            logger.info(f"✅ Botão clicado via Playwright click(): {selector}")
+                            submit_found = True
+                            break
+                        except Exception as e:
+                            logger.debug(f"  Clique normal falhou: {e}")
+                        
+                        # Método C: Clique via JavaScript
+                        try:
+                            await page.evaluate(f'document.querySelector("{selector}").click()')
+                            logger.info(f"✅ Botão clicado via JavaScript: {selector}")
+                            submit_found = True
+                            break
+                        except Exception as e:
+                            logger.debug(f"  Clique JS falhou: {e}")
+                        
+                        # Método D: Dispatch MouseEvent (mais realista)
+                        try:
+                            await page.evaluate(f"""
+                                () => {{
+                                    const el = document.querySelector("{selector}");
+                                    if (el) {{
+                                        const event = new MouseEvent('click', {{
+                                            bubbles: true,
+                                            cancelable: true,
+                                            view: window
+                                        }});
+                                        el.dispatchEvent(event);
+                                    }}
+                                }}
+                            """)
+                            logger.info(f"✅ Botão clicado via MouseEvent dispatch: {selector}")
+                            submit_found = True
+                            break
+                        except Exception as e:
+                            logger.debug(f"  MouseEvent falhou: {e}")
+                        
                 except Exception as e:
-                    logger.debug(f"  Seletor {selector} não encontrado ou click falhou: {e}")
+                    logger.debug(f"  Seletor {selector} não encontrado: {e}")
                     continue
 
+            # Estratégia 3: Fallback nuclear - Forçar submit do formulário
             if not submit_found:
-                logger.warning("⚠️ Botão de submit não foi encontrado")
-                # Último fallback: tentar clicar diretamente no link usando coordenadas
+                logger.warning("⚠️ Cliques normais não funcionaram. Tentando fallback nuclear...")
+                
+                # Tentativa 1: Procurar e fazer submit do formulário pai
                 try:
-                    if await self._click_element_with_mouse_coordinates(page, 'a#butregister'):
-                        logger.info("✅ Botão de submit clicado via coordenadas do mouse (fallback)")
+                    form_submitted = await page.evaluate("""
+                        () => {
+                            // Procura o formulário de registro
+                            const form = document.querySelector('form') || 
+                                       document.querySelector('[role="form"]') ||
+                                       document.querySelector('.form-register');
+                            
+                            if (form && typeof form.submit === 'function') {
+                                console.log('[Playwright] Submetendo formulário via form.submit()');
+                                form.submit();
+                                return true;
+                            }
+                            return false;
+                        }
+                    """)
+                    
+                    if form_submitted:
+                        logger.info("✅ Formulário submetido via form.submit()")
                         submit_found = True
                     else:
-                        logger.warning("⚠️ Fallback via coordenadas também falhou. Tentando page.click() force=True")
-                        await page.click('a#butregister', force=True)
-                        logger.info("✅ Botão de submit clicado via fallback force=True")
-                        submit_found = True
+                        logger.warning("⚠️ form.submit() não foi possível")
                 except Exception as e:
-                    logger.warning(f"⚠️ Fallback do submit também falhou: {e}. Tentando JS .click() no link direto")
+                    logger.warning(f"⚠️ Fallback form.submit() falhou: {e}")
+                
+                # Tentativa 2: Clique direto no link específico do XAT
+                if not submit_found:
                     try:
-                        await page.evaluate('document.querySelector("a#butregister")?.click()')
-                        logger.info("✅ Clique JS executado em a#butregister")
+                        await page.click('a#butregister', force=True)
+                        logger.info("✅ Clique force=True em a#butregister funcionou")
                         submit_found = True
-                    except Exception as js_error:
-                        logger.warning(f"⚠️ Clique JS em a#butregister falhou: {js_error}")
+                    except Exception as e:
+                        logger.warning(f"⚠️ force=True falhou: {e}")
+                
+                # Tentativa 3: Navegar para a ação do formulário se tudo mais falhar
+                if not submit_found:
+                    try:
+                        action_url = await page.evaluate("document.querySelector('form')?.action")
+                        if action_url:
+                            logger.warning(f"⚠️ Navegando para URL de ação do formulário: {action_url}")
+                            # Aqui poderíamos fazer POST via Playwright, mas é mais arriscado
+                            logger.warning("⚠️ Fallback de navegação não implementado - requer POST manual")
+                    except Exception as e:
+                        logger.debug(f"  Não foi possível extrair action URL: {e}")
+
+            if submit_found:
+                logger.info("✅ Submit bem-sucedido! Aguardando resposta...")
+            else:
+                logger.error("❌ Nenhuma estratégia de submit funcionou")
 
             # Esperar um pouco após o clique para o XAT processar o registro
             logger.info("⏳ Aguardando 3s após o clique para a mensagem final aparecer...")
@@ -3652,6 +3783,43 @@ class XATBrowserAutomation:
                 let dispatcherInvoked = false;
                 const callbackNames = [];
 
+                // 🔥 BUSCA PROFUNDA DE CALLBACKS - Procura em múltiplos locais
+                const deepSearchCallbacks = () => {
+                    const potentialCallbacks = [
+                        // Callbacks padrão do Turnstile
+                        window.__cf_turnstile_config?.callback,
+                        window.__cf_turnstile_config?.['data-callback'],
+                        window.__turnstile_config?.callback,
+                        window.__turnstile_config?.['data-callback'],
+                        // Callbacks customizados do XAT
+                        window.__xat_callbacks?.turnstile,
+                        window.__xat_callbacks?.captcha,
+                        window.onTurnstileComplete,
+                        window.onCaptchaComplete,
+                        window.turnstileOnComplete,
+                        // Via render
+                        window.__playwright_turnstile_callback,
+                        window.__playwright_turnstile_ready_callback,
+                        // Busca dinâmica em todos os on*** handlers
+                        ...Object.keys(window)
+                            .filter(k => k.startsWith('on') && typeof window[k] === 'function')
+                            .map(k => window[k])
+                    ];
+
+                    for (const cb of potentialCallbacks) {
+                        if (typeof cb === 'function') {
+                            try {
+                                console.log('[Playwright] Invocando callback encontrado via busca profunda');
+                                cb(token);
+                                return true;
+                            } catch (e) {
+                                console.log('[Playwright] Callback de busca profunda falhou:', e);
+                            }
+                        }
+                    }
+                    return false;
+                };
+
                 // Invoca callbacks de elementos que têm data-callback
                 document.querySelectorAll('[data-callback], [data-recaptcha-callback], [data-sitekey]').forEach(element => {
                     const callbackName = element.getAttribute('data-callback') || element.getAttribute('data-recaptcha-callback');
@@ -3676,6 +3844,17 @@ class XATBrowserAutomation:
                         if (invokeCallback(cfgCallback)) {
                             dispatcherInvoked = true;
                         }
+                    }
+                }
+
+                // Se nenhum callback foi encontrado, fazer busca profunda
+                if (callbackCount === 0) {
+                    console.log('[Playwright] Nenhum callback padrão encontrado, iniciando busca profunda...');
+                    if (deepSearchCallbacks()) {
+                        dispatcherInvoked = true;
+                        callbackCount += 1;
+                        callbackInvokedCount += 1;
+                        callbackNames.push('deepSearch');
                     }
                 }
 
