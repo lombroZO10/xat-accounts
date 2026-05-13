@@ -14,7 +14,7 @@ class AdsPowerManager:
 
     def __init__(self, api_url: str = "http://127.0.0.1:20725", api_key: Optional[str] = None):
         # Try multiple common AdsPower ports
-        self.possible_ports = [20725, 50325, 50326, 20726, 8080, 3000]
+        self.possible_ports = [20725, 50325, 50326, 20726, 8080, 3000, 9090, 5000]
         self.api_key = api_key
         self.session = requests.Session()
         self.api_url = None
@@ -29,7 +29,7 @@ class AdsPowerManager:
                     self.api_url = test_url
                     logger.info(f"✅ AdsPower API found on port {port}")
                     break
-            except:
+            except requests.exceptions.RequestException:
                 continue
         
         if not self.api_url:

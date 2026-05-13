@@ -215,7 +215,7 @@ DEFAULT_CONFIG = {
         "page_timeout": 90000,
         "home_timeout": 90000,  # Timeout para carregar página inicial (domcontentloaded)
         "login_timeout": 90000,  # Timeout para carregar página de login (networkidle)
-        "use_ads_power": False,  # Temporarily disabled until AdsPower is running
+        "use_ads_power": True,
         "ads_power_api_url": "http://127.0.0.1:20725",
         "ads_power_api_key": "64e06c1a51e916f82b06a71d921428f6008db5a025a70fb2",
         "ads_power_profile_id": "",
@@ -2146,27 +2146,33 @@ class XATBrowserAutomation:
 
         try:
             if self.use_ads_power:
-                if not self.ads_manager:
-                    self.ads_manager = AdsPowerManager(
-                        api_url=self.ads_power_api_url,
-                        api_key=self.ads_power_api_key
+                try:
+                    if not self.ads_manager:
+                        self.ads_manager = AdsPowerManager(
+                            api_url=self.ads_power_api_url,
+                            api_key=self.ads_power_api_key
+                        )
+
+                    logger.info(f"🔌 Iniciando AdsPower browser via API local: {self.ads_power_api_url}")
+                    ws_endpoint = await asyncio.to_thread(
+                        self.ads_manager.start_browser,
+                        self.ads_power_profile_id,
+                        self.ads_power_profile_name
                     )
+                    logger.info(f"✅ AdsPower retornou endpoint CDP: {ws_endpoint}")
 
-                logger.info(f"🔌 Iniciando AdsPower browser via API local: {self.ads_power_api_url}")
-                ws_endpoint = await asyncio.to_thread(
-                    self.ads_manager.start_browser,
-                    self.ads_power_profile_id,
-                    self.ads_power_profile_name
-                )
-                logger.info(f"✅ AdsPower retornou endpoint CDP: {ws_endpoint}")
+                    self.browser = await self.playwright.chromium.connect_over_cdp(ws_endpoint)
+                    self.context = self.browser.contexts[0] if self.browser.contexts else await self.browser.new_context()
+                    self.page = self.context.pages[0] if self.context.pages else await self.context.new_page()
+                    await self.context.route('**/*', self._block_unnecessary_assets)
+                    logger.info("✅ Conectado ao AdsPower via CDP")
+                    return
 
-                self.browser = await self.playwright.chromium.connect_over_cdp(ws_endpoint)
-                self.context = self.browser.contexts[0] if self.browser.contexts else await self.browser.new_context()
-                self.page = self.context.pages[0] if self.context.pages else await self.context.new_page()
-                await self.context.route('**/*', self._block_unnecessary_assets)
-                logger.info("✅ Conectado ao AdsPower via CDP")
-                return
+                except Exception as ads_error:
+                    logger.warning(f"⚠️ AdsPower falhou ({ads_error}), fazendo fallback para Playwright normal")
+                    self.use_ads_power = False  # Desabilita temporariamente para esta sessão
 
+            # Fallback para Playwright normal
             self.browser = await self.playwright.chromium.launch(
                 headless=self.config['browser_automation'].get('headless', True),
                 args=browser_args
