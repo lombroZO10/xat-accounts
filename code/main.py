@@ -2228,6 +2228,26 @@ class XATBrowserAutomation:
         except Exception as e:
             logger.warning(f"⚠️ Falha ao limpar identidade do contexto: {e}")
 
+    async def _get_available_page(self):
+        """Returns an existing page if available, otherwise creates one safely."""
+        if self.context:
+            if self.context.pages:
+                return self.context.pages[0]
+            try:
+                return await self.context.new_page()
+            except Exception as context_page_error:
+                logger.warning(f"⚠️ Falha ao criar page via context.new_page(): {context_page_error}")
+
+        if self.browser:
+            try:
+                page = await self.browser.new_page()
+                self.context = page.context
+                return page
+            except Exception as browser_page_error:
+                logger.warning(f"⚠️ Falha ao criar page via browser.new_page(): {browser_page_error}")
+
+        raise RuntimeError("Não foi possível criar ou obter uma página do navegador")
+
     def _is_allowed_sitekey(self, sitekey: Optional[str]) -> bool:
         """Valida se o sitekey pertence ao widget XAT Turnstile esperado."""
         if not sitekey:
@@ -2356,7 +2376,7 @@ class XATBrowserAutomation:
                 logger.info(f"🔒 [Session ID: ...{session_id_display}] Sticky IP ativado - Mantendo mesma sessão TCP durante todo o registro")
 
                 await self._clear_browser_context_identity()
-                page = await self.context.new_page()
+                page = await self._get_available_page()
                 page.set_default_timeout(self.config['browser_automation'].get('page_timeout', 90000))
 
                 # Passo 1: Obter UserID/k2 com retry de proxy em caso de bloqueio
@@ -2374,7 +2394,7 @@ class XATBrowserAutomation:
                     if not await self._rotate_proxy_and_recreate():
                         return False
                     proxy_inicial = self.current_proxy
-                    page = await self.context.new_page()
+                    page = await self._get_available_page()
                     page.set_default_timeout(self.config['browser_automation'].get('page_timeout', 90000))
 
                 user_id = user_data.get('UserId')
@@ -2411,7 +2431,7 @@ class XATBrowserAutomation:
                             return False
                         if not await self._rotate_proxy_and_recreate():
                             return False
-                        page = await self.context.new_page()
+                        page = await self._get_available_page()
                         page.set_default_timeout(self.config['browser_automation'].get('page_timeout', 90000))
                         continue
 
@@ -2425,7 +2445,7 @@ class XATBrowserAutomation:
                         return False
                     if not await self._rotate_proxy_and_recreate():
                         return False
-                    page = await self.context.new_page()
+                    page = await self._get_available_page()
                     page.set_default_timeout(self.config['browser_automation'].get('page_timeout', 90000))
 
                 if not login_success:
@@ -2455,7 +2475,7 @@ class XATBrowserAutomation:
                     if not await self._rotate_proxy_and_recreate():
                         return False
                     proxy_inicial = self.current_proxy
-                    page = await self.context.new_page()
+                    page = await self._get_available_page()
                     page.set_default_timeout(self.config['browser_automation'].get('page_timeout', 90000))
                     if attempt > 0:
                         await self._clear_browser_context_identity()
