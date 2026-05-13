@@ -166,11 +166,12 @@ class CloudflareHardBlockException(Exception):
 # Playwright imports
 try:
     from playwright.async_api import async_playwright, Browser, Page, BrowserContext, Locator
-    from playwright_stealth import Stealth
     PLAYWRIGHT_AVAILABLE = True
 except ImportError:
     PLAYWRIGHT_AVAILABLE = False
     async_playwright = None
+
+from adspowers import AdsPowerManager
 
 if importlib.util.find_spec('cloudscraper') is not None:
     cloudscraper = importlib.import_module('cloudscraper')
@@ -213,7 +214,12 @@ DEFAULT_CONFIG = {
         "captcha_timeout": 60,
         "page_timeout": 90000,
         "home_timeout": 90000,  # Timeout para carregar página inicial (domcontentloaded)
-        "login_timeout": 90000  # Timeout para carregar página de login (networkidle)
+        "login_timeout": 90000,  # Timeout para carregar página de login (networkidle)
+        "use_ads_power": True,
+        "ads_power_api_url": "http://127.0.0.1:50325",
+        "ads_power_api_key": "64e06c1a51e916f82b06a71d921428f6008db5a025a70fb2",
+        "ads_power_profile_id": "",
+        "ads_power_profile_name": ""
     },
     "captcha_solver": {
         "enabled": False,
@@ -1459,6 +1465,13 @@ class XATBrowserAutomation:
         self.playwright = None
         self.browser = None
         self.context = None
+        self.page = None
+        self.ads_manager: Optional[AdsPowerManager] = None
+        self.use_ads_power = self.config.get('browser_automation', {}).get('use_ads_power', True)
+        self.ads_power_api_url = self.config.get('browser_automation', {}).get('ads_power_api_url', 'http://127.0.0.1:50325')
+        self.ads_power_api_key = self.config.get('browser_automation', {}).get('ads_power_api_key')
+        self.ads_power_profile_id = self.config.get('browser_automation', {}).get('ads_power_profile_id')
+        self.ads_power_profile_name = self.config.get('browser_automation', {}).get('ads_power_profile_name')
         self.current_proxy_base = None
         self.current_proxy = None
         self.proxy_session_id = None
@@ -1494,7 +1507,7 @@ class XATBrowserAutomation:
         ]
 
         if not PLAYWRIGHT_AVAILABLE:
-            raise ImportError("❌ Playwright não está instalado. Execute: pip install playwright playwright-stealth")
+            raise ImportError("❌ Playwright não está instalado. Execute: pip install playwright")
 
         # 🔥 FORCE: Inicializar com o primeiro proxy da lista imediatamente
         # Isso garante que NENHUMA requisição seja feita sem proxy
@@ -1519,7 +1532,7 @@ class XATBrowserAutomation:
         await self.cleanup()
 
     async def initialize(self):
-        """Inicializa o navegador Playwright com stealth"""
+        """Inicializa o navegador Playwright ou AdsPower via CDP."""
         try:
             self.playwright = await async_playwright().start()
             attempt = 0
@@ -1561,7 +1574,7 @@ class XATBrowserAutomation:
                 
                 try:
                     await self._create_browser_context()
-                    logger.info("✅ Navegador Playwright inicializado com stealth")
+                    logger.info("✅ Browser inicializado via AdsPower/Playwright")
                     return
                 except Exception as e:
                     logger.error(f"❌ Erro ao inicializar contexto com proxy {self.current_proxy}: {e}")
@@ -2131,75 +2144,45 @@ class XATBrowserAutomation:
             '--disable-component-update'
         ]
 
-        self.browser = await self.playwright.chromium.launch(
-            headless=self.config['browser_automation'].get('headless', True),
-            args=browser_args
-        )
-
         try:
-            user_agent = random.choice(self.user_agents)
+            if self.use_ads_power:
+                if not self.ads_manager:
+                    self.ads_manager = AdsPowerManager(
+                        api_url=self.ads_power_api_url,
+                        api_key=self.ads_power_api_key
+                    )
+
+                logger.info(f"🔌 Iniciando AdsPower browser via API local: {self.ads_power_api_url}")
+                ws_endpoint = await asyncio.to_thread(
+                    self.ads_manager.start_browser,
+                    self.ads_power_profile_id,
+                    self.ads_power_profile_name
+                )
+                logger.info(f"✅ AdsPower retornou endpoint CDP: {ws_endpoint}")
+
+                self.browser = await self.playwright.chromium.connect_over_cdp(ws_endpoint)
+                self.context = self.browser.contexts[0] if self.browser.contexts else await self.browser.new_context()
+                self.page = self.context.pages[0] if self.context.pages else await self.context.new_page()
+                await self.context.route('**/*', self._block_unnecessary_assets)
+                logger.info("✅ Conectado ao AdsPower via CDP")
+                return
+
+            self.browser = await self.playwright.chromium.launch(
+                headless=self.config['browser_automation'].get('headless', True),
+                args=browser_args
+            )
+
             viewport = random.choice(self.screen_resolutions)
             self.context = await self.browser.new_context(
                 viewport=viewport,
                 device_scale_factor=1,
                 has_touch=False,
-                user_agent=user_agent,
                 locale='pt-BR',
                 timezone_id='America/Sao_Paulo',
-                extra_http_headers=self._build_extra_http_headers(user_agent),
-                proxy=proxy_config,
                 ignore_https_errors=True
             )
+            self.page = self.context.pages[0] if self.context.pages else await self.context.new_page()
             await self.context.route('**/*', self._block_unnecessary_assets)
-
-            try:
-                logger.info("🎭 Aplicando configurações de stealth (playwright-stealth)...")
-                stealth_config = Stealth(
-                    webgl_vendor_override='Intel Inc.',
-                    webgl_renderer_override='Intel(R) Iris(TM) Graphics 6100',
-                    navigator_vendor_override=self._get_navigator_vendor_override(user_agent),
-                    navigator_platform_override=self._get_navigator_platform_override(user_agent),
-                    navigator_user_agent_override=user_agent,
-                    sec_ch_ua_override=self._get_sec_ch_ua(user_agent),
-                    navigator_languages_override=('pt-BR', 'pt', 'en-US', 'en'),
-                    chrome_app=True,
-                    chrome_csi=True,
-                    chrome_load_times=True,
-                    chrome_runtime=True,
-                    hairline=True,
-                    iframe_content_window=True,
-                    media_codecs=True,
-                    navigator_hardware_concurrency=True,
-                    navigator_languages=True,
-                    navigator_permissions=True,
-                    navigator_platform=True,
-                    navigator_plugins=True,
-                    navigator_user_agent=True,
-                    navigator_user_agent_data=True,
-                    navigator_vendor=True,
-                    navigator_webdriver=True,
-                    error_prototype=True,
-                    sec_ch_ua=True,
-                    webgl_vendor=True
-                )
-                await stealth_config.apply_stealth_async(self.context)
-                logger.info("✅ Stealth aplicado com sucesso")
-            except AttributeError as ae:
-                logger.warning(f"⚠️ Erro AttributeError ao aplicar stealth: {ae}")
-                logger.info("💡 Tentando aplicar stealth sem sobrescrita de user_agent...")
-                try:
-                    stealth_minimal = Stealth(
-                        chrome_app=True,
-                        navigator_webdriver=True,
-                        hairline=True,
-                        webgl_vendor=True
-                    )
-                    await stealth_minimal.apply_stealth_async(self.context)
-                    logger.info("✅ Stealth mínimo aplicado com sucesso")
-                except Exception as e2:
-                    logger.warning(f"⚠️ Stealth mínimo também falhou: {e2}, continuando sem stealth")
-            except Exception as e:
-                logger.warning(f"⚠️ Erro geral ao aplicar stealth: {e}, continuando sem stealth")
 
         except Exception as e:
             logger.error(f"❌ Falha ao criar contexto Playwright com proxy {self.current_proxy}: {e}")
@@ -3067,6 +3050,18 @@ class XATBrowserAutomation:
         except Exception as e:
             logger.debug(f"⚠️ Falha ao simular movimento de mouse: {e}")
 
+    async def _hesitate_before_final_click(self, page: Page) -> None:
+        """Simula hesitação humana antes do clique final do botão de registro."""
+        try:
+            x = random.randint(100, 1500)
+            y = random.randint(100, 900)
+            steps = random.randint(8, 16)
+            await page.mouse.move(x, y, steps=steps)
+            await page.wait_for_timeout(random.randint(200, 600))
+            logger.debug(f"🐭 Hesitação antes do clique final: moved to ({x}, {y}) in {steps} steps")
+        except Exception as e:
+            logger.debug(f"⚠️ Falha ao simular hesitação antes do clique final: {e}")
+
     async def _detect_cloudflare_challenge(self, page: Page, context: str = 'home') -> bool:
         """Detecta se a página atual está passando por Cloudflare challenge/bloqueio."""
         try:
@@ -3680,6 +3675,7 @@ class XATBrowserAutomation:
                         
                         # Método B: Clique normal do Playwright
                         try:
+                            await self._hesitate_before_final_click(page)
                             await button.click()
                             logger.info(f"✅ Botão clicado via Playwright click(): {selector}")
                             submit_found = True
@@ -3754,6 +3750,7 @@ class XATBrowserAutomation:
                 # Tentativa 2: Clique direto no link específico do XAT
                 if not submit_found:
                     try:
+                        await self._hesitate_before_final_click(page)
                         await page.click('a#butregister', force=True)
                         logger.info("✅ Clique force=True em a#butregister funcionou")
                         submit_found = True
@@ -4906,8 +4903,9 @@ class XATBrowserAutomation:
         # Isto dá tempo para o JavaScript do xat processar a notificação cf_callback/Turnstile
         # Aumentado de 3.5s para 10s para dar ao Turnstile tempo suficiente de processar o token
         # e evitar o erro "The captcha verification was not successful"
-        await page.wait_for_timeout(10000)
-        logger.info("✅ Aguardado 10000ms (10s) para sincronizar callbacks do captcha com o Turnstile")
+        wait_time = random.uniform(8, 15)
+        await asyncio.sleep(wait_time)
+        logger.info(f"✅ Aguardado {wait_time:.1f}s após injetar captcha para sincronizar callbacks do Turnstile")
 
 
     async def _inject_captcha_token_if_missing(self, page: Page) -> None:
