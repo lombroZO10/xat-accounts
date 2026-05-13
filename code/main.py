@@ -1799,23 +1799,12 @@ class XATBrowserAutomation:
             self.current_proxy = self.current_proxy_base
             return True
 
-        for attempt in range(1, max_retries + 1):
-            self._refresh_proxy_session(self.current_proxy_base)
-            if self._test_proxy_ip_and_country(self.current_proxy, timeout=timeout):
-                logger.info(f"✅ Proxy com Session ID definido após {attempt} tentativa(s): {self.current_proxy}")
-                self.last_proxy_test_error = None
-                return True
-            logger.warning(
-                f"⚠️ Session ID {attempt} falhou no teste de IP/país para proxy {self.current_proxy}: {self.last_proxy_test_error}. Gerando novo Session ID..."
-            )
-
-        logger.warning(
-            f"⚠️ Todas as {max_retries} tentativas de Session ID falharam para proxy {self.current_proxy_base}. Último erro: {self.last_proxy_test_error}"
-        )
-        self.proxy_session_id = None
-        self.current_proxy = self.current_proxy_base
-        logger.warning("⚠️ Usando proxy base sem Session ID como fallback para manter o fluxo.")
-        return False
+        # 🔥 Webshare bloqueia testes de IP com Session ID (407/400), então gera um Session ID e usa direto
+        # Sem fazer testes adicionais que resultariam em falsos negativos
+        self._refresh_proxy_session(self.current_proxy_base)
+        logger.info(f"✅ Proxy com Session ID definido (sem teste, Webshare não permite): {self.current_proxy}")
+        self.last_proxy_test_error = None
+        return True
 
     async def _refresh_proxy_session_and_recreate(self) -> bool:
         if self.current_proxy_base is None and self.proxies:
