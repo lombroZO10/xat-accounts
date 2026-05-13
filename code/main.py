@@ -2263,7 +2263,16 @@ class XATBrowserAutomation:
         """Valida se o sitekey pertence ao widget XAT Turnstile esperado."""
         if not sitekey:
             return False
-        return sitekey in self.VALID_XAT_SITEKEYS
+
+        if sitekey in self.VALID_XAT_SITEKEYS:
+            return True
+
+        # XAT pode mudar o sitekey do Turnstile dinamicamente com novos valores 0x4...
+        if re.match(r'^0x4[A-Za-z0-9_-]{20,32}$', sitekey):
+            logger.info(f"ℹ️ Aceitando sitekey XAT dinâmica: {sitekey}")
+            return True
+
+        return False
 
     async def _rotate_proxy_and_recreate(self) -> bool:
         """Seleciona um novo proxy ou renova Session ID e recria o contexto do navegador."""
