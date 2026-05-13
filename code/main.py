@@ -2697,27 +2697,21 @@ class XATBrowserAutomation:
             login_url = f"{self.LOGIN_URL}?mode=1&UserId={user_id}&k2={k2_token}"
             await self._patch_turnstile_callbacks(page)
 
-            logger.info("🧍 Navegando para a página inicial antes de acessar /login para simular tráfego humano")
+            logger.info("🧍 Acessando /login diretamente para reduzir exposição a Cloudflare")
+            login_timeout = self.config['browser_automation'].get('login_timeout', 90000)
             try:
-                home_timeout = self.config['browser_automation'].get('home_timeout', 90000)
-                await page.goto(self.BASE_URL, wait_until='domcontentloaded', timeout=home_timeout)
-                await self._perform_pre_login_home_flow(page)
-            except CloudflareHardBlockException:
-                raise
+                response = await page.goto(login_url, wait_until='domcontentloaded', timeout=login_timeout)
             except Exception as e:
                 msg = str(e).lower()
                 if 'timeout' in msg or 'timed out' in msg:
-                    logger.warning(f"⚠️ Timeout ao visitar home antes do login: {e}")
+                    logger.warning(f"⚠️ Timeout ao acessar login: {e}")
                     self.proxy_session_restart_pending = True
-                    raise CloudflareHardBlockException("Home timeout antes do login")
-                logger.warning(f"⚠️ Falha ao visitar home antes do login: {e}")
+                    return False
+                logger.warning(f"⚠️ Falha ao acessar login diretamente: {e}")
+                return False
 
-            login_timeout = self.config['browser_automation'].get('login_timeout', 90000)
-            response = await page.goto(login_url, wait_until='networkidle', timeout=login_timeout)
-
-            # Aguardar a página intersticial do Cloudflare sumir ("Checking your browser")
-            logger.info("⏳ Aguardando 5s para página intersticial Cloudflare carregar/sumir...")
-            await page.wait_for_timeout(5000)
+            # Pequena espera para DOM inicial e scripts básicos
+            await page.wait_for_timeout(2000)
 
             blocked_status = False
             if response and response.status in [403, 503]:
