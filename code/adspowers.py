@@ -19,12 +19,12 @@ class AdsPowerManager:
         self.session = requests.Session()
         self.api_url = None
         
-        # Test which port works
+        # Test which port works, preferring AdsPower default 20725
         for port in self.possible_ports:
             test_url = f"http://127.0.0.1:{port}"
             try:
-                # Quick test without auth first
-                response = self.session.get(f"{test_url}/api/v1/browser/start", timeout=2)
+                headers = {'api-key': self.api_key} if self.api_key else {}
+                response = self.session.get(f"{test_url}/api/v1/browser/start", timeout=2, headers=headers)
                 if response.status_code in [200, 401, 403]:  # 401/403 means endpoint exists but needs auth
                     self.api_url = test_url
                     logger.info(f"✅ AdsPower API found on port {port}")
@@ -39,69 +39,50 @@ class AdsPowerManager:
         self.api_url = self.api_url.rstrip('/')
         self.headers: Dict[str, str] = {}
         if api_key:
-            self.headers['Authorization'] = f'Bearer {api_key}'
+            self.headers['api-key'] = api_key
 
     def _request(self, path: str, method: str = 'GET', **kwargs: Any) -> Dict[str, Any]:
         url = f"{self.api_url}{path}"
+        kwargs_headers = kwargs.pop('headers', {})
+        request_headers = {**kwargs_headers}
+        if self.api_key:
+            request_headers['api-key'] = self.api_key
 
-        # Try different authentication methods
-        auth_methods = [
-            {'Authorization': f'Bearer {self.api_key}'},
-            {'token': self.api_key},
-            {'API-Key': self.api_key},
-            {'X-API-Key': self.api_key},
-            {'apikey': self.api_key},
-        ]
+        logger.debug(f"AdsPower API request {method} {url} headers={request_headers} payload={kwargs.get('json') or kwargs.get('params')}")
 
-        last_error = None
-
-        # Try each authentication method
-        for auth_headers in auth_methods:
-            try:
-                kwargs_headers = kwargs.pop('headers', {})
-                request_headers = {**auth_headers, **kwargs_headers}
-
-                logger.debug(f"AdsPower API request {method} {url} auth={auth_headers} payload={kwargs.get('json') or kwargs.get('params')}")
-
-                if method.upper() == 'GET':
-                    response = self.session.get(url, timeout=15, headers=request_headers, **kwargs)
-                else:
-                    response = self.session.post(url, timeout=15, headers=request_headers, **kwargs)
-
-                response.raise_for_status()
-                try:
-                    return response.json()
-                except ValueError as exc:
-                    raise RuntimeError(f"AdsPower API returned invalid JSON for {url}: {exc}") from exc
-
-            except Exception as e:
-                last_error = str(e)
-                logger.debug(f"AdsPower auth method failed: {auth_headers} - {last_error}")
-
-        # Try query parameter authentication as last resort
         try:
-            query_url = f"{url}{'&' if '?' in url else '?'}token={self.api_key}"
-            kwargs_headers = kwargs.pop('headers', {})
-            request_headers = {**kwargs_headers}
-
-            logger.debug(f"AdsPower API request {method} {query_url} (query auth) payload={kwargs.get('json') or kwargs.get('params')}")
-
             if method.upper() == 'GET':
-                response = self.session.get(query_url, timeout=15, headers=request_headers, **kwargs)
+                response = self.session.get(url, timeout=15, headers=request_headers, **kwargs)
             else:
-                response = self.session.post(query_url, timeout=15, headers=request_headers, **kwargs)
+                response = self.session.post(url, timeout=15, headers=request_headers, **kwargs)
 
             response.raise_for_status()
             try:
                 return response.json()
             except ValueError as exc:
-                raise RuntimeError(f"AdsPower API returned invalid JSON for {query_url}: {exc}") from exc
+                raise RuntimeError(f"AdsPower API returned invalid JSON for {url}: {exc}") from exc
+        except Exception as e:
+            last_error = str(e)
+            logger.debug(f"AdsPower request failed: {last_error}")
 
+        # Try query parameter authentication as last resort
+        try:
+            query_url = f"{url}{'&' if '?' in url else '?'}token={self.api_key}"
+            logger.debug(f"AdsPower API request {method} {query_url} (query auth) payload={kwargs.get('json') or kwargs.get('params')}")
+            if method.upper() == 'GET':
+                response = self.session.get(query_url, timeout=15, headers=kwargs_headers, **kwargs)
+            else:
+                response = self.session.post(query_url, timeout=15, headers=kwargs_headers, **kwargs)
+            response.raise_for_status()
+            try:
+                return response.json()
+            except ValueError as exc:
+                raise RuntimeError(f"AdsPower API returned invalid JSON for {query_url}: {exc}") from exc
         except Exception as e:
             last_error = str(e)
             logger.debug(f"AdsPower query auth failed: {last_error}")
 
-        raise RuntimeError(f"All AdsPower authentication methods failed. Last error: {last_error}")
+        raise RuntimeError(f"AdsPower API request failed. Last error: {last_error}")
 
     def _parse_ws_endpoint(self, result: Dict[str, Any]) -> Optional[str]:
         if not isinstance(result, dict):
@@ -165,11 +146,11 @@ class AdsPowerManager:
             payload.update(extra_options)
 
         endpoints = [
+            '/api/v1/browser/open',
             '/api/v1/browser/start',
             '/api/browser/start',
             '/api/v1/start_browser',
-            '/api/v1/ads/start',
-            '/api/v1/browser/open'
+            '/api/v1/ads/start'
         ]
 
         last_error: Optional[str] = None

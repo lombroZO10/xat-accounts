@@ -615,8 +615,8 @@ class XATAccountGenerator:
             kwargs['proxies'] = current_proxy
             kwargs['timeout'] = self.config['timeout'].get('requisicao', 20)
             
-            # Rotacionar User-Agent
-            self.session.headers['User-Agent'] = random.choice(self.USER_AGENTS)
+            # Forçar User-Agent fixo para sincronizar com o browser AdsPower
+            self.session.headers['User-Agent'] = self.current_user_agent
             
             try:
                 if method.upper() == 'GET':
@@ -653,8 +653,8 @@ class XATAccountGenerator:
                     kwargs['proxies'] = proxy
                     kwargs['timeout'] = self.config['timeout'].get('requisicao', 20)
 
-                    # Rotacionar User-Agent
-                    self.session.headers['User-Agent'] = random.choice(self.USER_AGENTS)
+                    # Forçar User-Agent fixo para sincronizar com o browser AdsPower
+                    self.session.headers['User-Agent'] = self.current_user_agent
 
                     if method.upper() == 'GET':
                         resposta = self.session.get(url, **kwargs)
@@ -713,7 +713,7 @@ class XATAccountGenerator:
                 kwargs['timeout'] = self.config['timeout'].get('requisicao', 20)
                 kwargs['proxies'] = None
 
-                self.session.headers['User-Agent'] = random.choice(self.USER_AGENTS)
+                self.session.headers['User-Agent'] = self.current_user_agent
 
                 if method.upper() == 'GET':
                     resposta = self.session.get(url, **kwargs)
@@ -1469,13 +1469,15 @@ class XATBrowserAutomation:
         self.ads_manager: Optional[AdsPowerManager] = None
         self.ads_power_cdp_endpoint: Optional[str] = None
         self.use_ads_power = self.config.get('browser_automation', {}).get('use_ads_power', True)
-        self.ads_power_api_url = self.config.get('browser_automation', {}).get('ads_power_api_url', 'http://127.0.0.1:50325')
+        self.ads_power_api_url = self.config.get('browser_automation', {}).get('ads_power_api_url', 'http://127.0.0.1:20725')
         self.ads_power_api_key = self.config.get('browser_automation', {}).get('ads_power_api_key')
         self.ads_power_profile_id = self.config.get('browser_automation', {}).get('ads_power_profile_id')
         self.ads_power_profile_name = self.config.get('browser_automation', {}).get('ads_power_profile_name')
         self.current_proxy_base = None
         self.current_proxy = None
         self.proxy_session_id = None
+        self.force_user_agent = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
+        self.current_user_agent = self.force_user_agent
         self.proxy_session_restart_pending = False
         self.proxy_index = 0  # Índice para rastrear proxy atual
         self.local_proxy_server = None
@@ -1515,6 +1517,7 @@ class XATBrowserAutomation:
         if self.proxies:
             try:
                 self._select_first_paid_proxy()
+                self.session.headers['User-Agent'] = self.current_user_agent
                 logger.info(f"✅ Proxy inicial definido obrigatoriamente: {self.current_proxy}")
             except Exception as e:
                 logger.warning(f"⚠️ Falha ao definir proxy inicial: {e}")
@@ -2178,7 +2181,7 @@ class XATBrowserAutomation:
 
                         if not self.context and self.browser:
                             try:
-                                self.context = await self.browser.new_context()
+                                self.context = await self.browser.new_context(proxy=proxy_config, user_agent=self.current_user_agent)
                             except Exception as ctx_error:
                                 logger.warning(f"⚠️ Falha ao criar novo contexto AdsPower: {ctx_error}")
 
@@ -2200,7 +2203,10 @@ class XATBrowserAutomation:
                                 raise
 
                         if self.context:
+                            await self.context.add_init_script(self._get_stealth_init_script())
                             await self.context.route('**/*', self._block_unnecessary_assets)
+                            logger.info("✅ AdsPower browser pronto para uso")
+                            return
 
                 except Exception as ads_error:
                     logger.warning(f"⚠️ AdsPower falhou ({ads_error}), fazendo fallback para Playwright normal")
@@ -2219,8 +2225,11 @@ class XATBrowserAutomation:
                 has_touch=False,
                 locale='pt-BR',
                 timezone_id='America/Sao_Paulo',
-                ignore_https_errors=True
+                ignore_https_errors=True,
+                proxy=proxy_config,
+                user_agent=self.current_user_agent
             )
+            await self.context.add_init_script(self._get_stealth_init_script())
             self.page = self.context.pages[0] if self.context.pages else await self.context.new_page()
             await self.context.route('**/*', self._block_unnecessary_assets)
 
@@ -2258,6 +2267,29 @@ class XATBrowserAutomation:
                 logger.warning(f"⚠️ Falha ao criar page via browser.new_page(): {browser_page_error}")
 
         raise RuntimeError("Não foi possível criar ou obter uma página do navegador")
+
+    def _get_stealth_init_script(self) -> str:
+        """Retorna um script de inicialização para reduzir detecção de automação."""
+        return """
+        (() => {
+            try {
+                Object.defineProperty(navigator, 'webdriver', {get: () => undefined});
+            } catch (e) {}
+            try {
+                Object.defineProperty(navigator, 'languages', {
+                    get: () => ['pt-BR', 'pt', 'en-US', 'en']
+                });
+            } catch (e) {}
+            try {
+                Object.defineProperty(navigator, 'plugins', {
+                    get: () => [{}, {}, {}, {}]
+                });
+            } catch (e) {}
+            try {
+                window.chrome = window.chrome || {runtime: {}};
+            } catch (e) {}
+        })();
+        """
 
     def _is_allowed_sitekey(self, sitekey: Optional[str]) -> bool:
         """Valida se o sitekey pertence ao widget XAT Turnstile esperado."""
@@ -4210,6 +4242,15 @@ class XATBrowserAutomation:
                         }
                     }
 
+                    const scripts = Array.from(document.scripts || []);
+                    for (const script of scripts) {
+                        const text = script.textContent || '';
+                        const match = text.match(/(0x4AAAAAAA[A-Za-z0-9_-]{12,30})/);
+                        if (match) {
+                            return match[1];
+                        }
+                    }
+
                     if (window.__cf_turnstile_config && window.__cf_turnstile_config.sitekey) {
                         return window.__cf_turnstile_config.sitekey;
                     }
@@ -4242,12 +4283,12 @@ class XATBrowserAutomation:
 
             html_content = html.unescape(html_content)
             patterns = [
-                r'data-sitekey=["\']([^"\']+)["\']',
-                r'data-cf-turnstile-sitekey=["\']([^"\']+)["\']',
-                r'sitekey\s*[:=]\s*["\'](0x4[a-zA-Z0-9_-]{18,30})["\']',
-                r'"sitekey"\s*:\s*"(0x4[a-zA-Z0-9_-]{18,30})"',
-                r'\bsitekey=(0x4[a-zA-Z0-9_-]{18,30})\b',
-                r'(0x4[a-zA-Z0-9_-]{18,30})'
+                r'data-sitekey=["\'](0x4AAAAAAA[A-Za-z0-9_-]{12,30})["\']',
+                r'data-cf-turnstile-sitekey=["\'](0x4AAAAAAA[A-Za-z0-9_-]{12,30})["\']',
+                r'sitekey\s*[:=]\s*["\'](0x4AAAAAAA[A-Za-z0-9_-]{12,30})["\']',
+                r'"sitekey"\s*:\s*"(0x4AAAAAAA[A-Za-z0-9_-]{12,30})"',
+                r'\bsitekey=(0x4AAAAAAA[A-Za-z0-9_-]{12,30})\b',
+                r'(0x4AAAAAAA[A-Za-z0-9_-]{12,30})'
             ]
             for pattern in patterns:
                 match = re.search(pattern, html_content)
@@ -5067,8 +5108,8 @@ class XATBrowserAutomation:
             return None
 
         try:
-            method = 'turnstile' if sitekey.startswith('0x') else 'userrecaptcha'
             normalized_pageurl = self._normalize_captcha_pageurl(page_url)
+            method = 'turnstile' if 'xat.com/login?mode=1' in normalized_pageurl.lower() else ('turnstile' if sitekey.startswith('0x') else 'userrecaptcha')
             logger.info(f"🔐 Enviando desafio reCAPTCHA/Turnstile para 2captcha (method={method}, sitekey={sitekey[:20]}..., pageurl={normalized_pageurl})")
 
             params = {
@@ -5081,16 +5122,19 @@ class XATBrowserAutomation:
             # ⚠️ FEATURE: 2Captcha Proxy-On + User-Agent Synchronization
             # Para resolver o erro "The captcha verification was not successful"
             # O xat detecta quando o IP/fingerprint do solver != IP/fingerprint do navegador
-            if self.current_proxy and '@' in self.current_proxy:
+            parsed_proxy = None
+            if self.current_proxy:
                 try:
-                    # ⚠️ Usar credenciais específicas do Webshare BR-rotate conforme solicitado
-                    # Isso garante que o 2Captcha resolva o captcha com IP brasileiro
-                    webshare_proxy = "cqgsjjoe-BR-rotate:syeim3ngqut4@p.webshare.io:80"
-                    params['proxy'] = webshare_proxy
-                    params['proxytype'] = 'HTTP'
-                    logger.info(f"🔒 2Captcha Proxy-On ativado: usando proxy brasileiro {webshare_proxy} para resolver captcha")
-                except Exception as proxy_error:
-                    logger.warning(f"⚠️ Erro ao configurar 2Captcha Proxy-On: {proxy_error}")
+                    parsed_proxy = urlparse(self.current_proxy)
+                except Exception:
+                    parsed_proxy = None
+
+            if parsed_proxy and parsed_proxy.username and parsed_proxy.password and parsed_proxy.hostname and parsed_proxy.port:
+                proxy_auth = f"{parsed_proxy.username}:{parsed_proxy.password}@{parsed_proxy.hostname}:{parsed_proxy.port}"
+                proxy_type = 'HTTP' if parsed_proxy.scheme in ('http', 'https') else parsed_proxy.scheme.upper()
+                params['proxy'] = proxy_auth
+                params['proxytype'] = proxy_type
+                logger.info(f"🔒 2Captcha Proxy-On ativado usando proxy atual: {proxy_auth}")
             else:
                 logger.info("ℹ️ 2Captcha sem Proxy-On (proxy atual não disponível ou não autenticado)")
 
@@ -5107,13 +5151,14 @@ class XATBrowserAutomation:
                 logger.info(f"🎭 User-Agent padrão: {default_ua[:50]}...")
 
             if method == 'turnstile':
-                params['sitekey'] = sitekey.strip()
-                # Forçar action padrão para xat login se não houver action explícito
-                action = payload.get('action') if payload else None
-                if not action and 'xat.com' in normalized_pageurl:
-                    action = 'login'
-                if action and action.strip():
-                    params['data[action]'] = action.strip()
+                if 'xat.com/login?mode=1' in normalized_pageurl.lower():
+                    params['sitekey'] = '0x4AAAAAAADnPIDROrmt1Wwj'
+                    params['data[action]'] = 'login'
+                else:
+                    params['sitekey'] = sitekey.strip()
+                    action = payload.get('action') if payload else None
+                    if action and action.strip():
+                        params['data[action]'] = action.strip()
                 extra_data = payload.get('data') if payload else None
                 if extra_data and extra_data.strip():
                     params['data'] = extra_data.strip()
