@@ -1,5 +1,30 @@
 ﻿# ðŸŒ Guia Completo de Proxies e Recursos
 
+## ðŸ”§ Configuração Atual - Webshare Rotating Proxies
+
+### Proxy Ativo (Estados Unidos)
+```
+Host: p.webshare.io
+Port: 80
+Username: cqgsjjoe-US-rotate
+Password: syeim3ngqut4
+Formato: http://cqgsjjoe-US-rotate:syeim3ngqut4@p.webshare.io:80
+```
+
+### Como Funciona
+- **Rotating**: IP muda automaticamente a cada requisição
+- **Geo-targeting**: Rota dos EUA para melhor compatibilidade
+- **Session IDs**: Suporte a sessões persistentes para evitar detecção
+- **Rate Limits**: Adequado para automação moderada
+
+### Arquivo de Configuração
+O proxy está configurado em `data/proxies.txt`:
+```
+http://cqgsjjoe-US-rotate:syeim3ngqut4@p.webshare.io:80
+```
+
+---
+
 ## ðŸ“ Onde Obter Proxies
 
 ### OpÃ§Ã£o 1: Listas PÃºblicas (Gratuitas - âš ï¸ InstÃ¡veis)

@@ -309,7 +309,7 @@ class XATAccountGenerator:
         session.trust_env = False
         session.headers.update({
             'User-Agent': random.choice(self.USER_AGENTS),
-            'Accept-Language': 'pt-BR,pt;q=0.9,en-US;q=0.8,en;q=0.7',
+            'Accept-Language': 'en-US,en;q=0.9',
             'Accept-Encoding': 'gzip, deflate',
             'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8',
             'DNT': '1',
@@ -1050,7 +1050,7 @@ class XATAccountGenerator:
                     return False
 
                 if self.config['captcha_solver'].get('enabled', False):
-                    token = self._resolver_recaptcha(sitekey, self.last_captcha_page_url or url_registro)
+                    token = self._resolver_recaptcha(sitekey, self.last_captcha_page_url or url_registro, user_agent=self.current_user_agent)
                     if token:
                         response_field = 'cf-turnstile-response' if sitekey.startswith('0x') else 'g-recaptcha-response'
                         dados[response_field] = token
@@ -1476,7 +1476,7 @@ class XATBrowserAutomation:
         self.current_proxy_base = None
         self.current_proxy = None
         self.proxy_session_id = None
-        self.force_user_agent = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
+        self.force_user_agent = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36"
         self.current_user_agent = self.force_user_agent
         self.proxy_session_restart_pending = False
         self.proxy_index = 0  # Índice para rastrear proxy atual
@@ -2269,8 +2269,8 @@ class XATBrowserAutomation:
                 viewport=viewport,
                 device_scale_factor=1,
                 has_touch=False,
-                locale='pt-BR',
-                timezone_id='America/Sao_Paulo',
+                locale='en-US',
+                timezone_id='America/New_York',
                 ignore_https_errors=True,
                 proxy=proxy_config,
                 user_agent=self.current_user_agent
@@ -2882,8 +2882,24 @@ class XATBrowserAutomation:
             await self._simulate_mouse_movement(page)
             await self._simulate_human_interaction(page)
 
-            # Aguardar um pouco para cookies serem estabelecidos
-            await page.wait_for_timeout(2000)
+            # 🔥 INTERAÇÃO RANDÔMICA COM MOUSE WHEEL PARA IPs DE DATACENTER
+            logger.info("🖱️ Adicionando interação randômica com mouse wheel...")
+            await page.wait_for_timeout(5000)  # Aguardar 5 segundos após carregamento
+            await page.mouse.wheel(0, 500)  # Scroll down
+            await page.wait_for_timeout(1000)
+            await page.mouse.wheel(0, -500)  # Scroll back to top
+            logger.info("✅ Interação com mouse wheel concluída")
+
+            # Aguardar 12 segundos para cookies serem estabelecidos (aumentado para IPs de datacenter)
+            logger.info("⏳ Aguardando 12 segundos para estabelecimento completo dos cookies...")
+            await page.wait_for_timeout(12000)
+
+            # 🔥 VERIFICAÇÃO DE TÍTULO: Confirmar se contém "xat"
+            final_title = await page.title()
+            if 'xat' not in final_title.lower():
+                logger.warning(f"⚠️ Título da página não contém 'xat': '{final_title}'")
+                self._blacklist_current_proxy("Página principal não carregou corretamente (título sem 'xat')")
+                return False
 
             logger.info("✅ Aquecimento de cookies concluído - cookies estabelecidos para bypass Cloudflare")
             return True
@@ -5277,10 +5293,10 @@ class XATBrowserAutomation:
                 params['userAgent'] = user_agent
                 logger.info(f"🎭 User-Agent synchronization: enviando mesmo UA do navegador para 2Captcha")
             else:
-                # User-Agent padrão compatível com IPs brasileiros (Chrome 131)
+                # User-Agent padrão compatível com IPs dos EUA (Chrome 131)
                 default_ua = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36"
                 params['userAgent'] = default_ua
-                logger.info(f"🎭 User-Agent padrão: {default_ua[:50]}...")
+                logger.info(f"🎭 User-Agent padrão (US): {default_ua[:50]}...")
 
             if method == 'turnstile':
                 if 'xat.com/login?mode=1' in normalized_pageurl.lower():

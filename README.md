@@ -8,6 +8,27 @@ Gerador automÃ¡tico de contas para **XAT.COM** com rotaÃ§Ã£o de proxies, t
 - Arquivo `data/emails.txt` (um email por linha)
 - Arquivo `data/proxies.txt` (proxies no formato `ip:porta` ou `ip:porta:user:pass`)
 
+## ðŸ“‹ Configuração Atual
+
+### 🌍 Localização e Idioma
+- **Proxies**: Webshare Rotating (Estados Unidos)
+- **Locale**: `en-US`
+- **Timezone**: `America/New_York`
+- **Accept-Language**: `en-US,en;q=0.9`
+
+### 🛡️ Anti-Detecção
+- Aquecimento de cookies reforçado (12s + interações)
+- Verificação de título da página
+- Interações randômicas com mouse wheel
+- AdsPower CDP para bypass avançado
+- **User-Agent synchronization** com 2Captcha solver
+
+## ðŸ“‹ Requisitos
+
+- Python 3.8+
+- Arquivo `data/emails.txt` (um email por linha)
+- Arquivo `data/proxies.txt` (proxies no formato `ip:porta` ou `ip:porta:user:pass`)
+
 ## ðŸ”§ InstalaÃ§Ã£o
 
 ```bash
