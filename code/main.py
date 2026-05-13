@@ -2932,70 +2932,6 @@ class XATBrowserAutomation:
             # Upgrade Final: Clique Humanizado no Widget antes de enviar para 2Captcha
             logger.info("🖱️ Preparando clique humanizado no widget Turnstile...")
 
-            # 🔥 AUTO-RELOAD INTELIGENTE: Se widget não carregar, recarregar página com User-Agent alternativo
-            widget_load_attempts = 0
-            max_reload_attempts = 2
-            widget_loaded = False
-            
-            widget_timeout = self.config['browser_automation'].get('page_timeout', 90000)
-            while widget_load_attempts < max_reload_attempts and not widget_loaded:
-                try:
-                    await page.wait_for_selector('iframe[src*="challenges.cloudflare.com"], iframe[src*="turnstile"], iframe[src*="captcha"]', timeout=widget_timeout)
-                    logger.info(f"✅ Widget Turnstile confirmado carregado após {widget_timeout}ms")
-                    widget_loaded = True
-                except Exception as e:
-                    widget_load_attempts += 1
-                    if widget_load_attempts >= max_reload_attempts:
-                        reason = f"Turnstile iframe não apareceu após {max_reload_attempts * 30}s"
-                        logger.warning(f"⚠️ {reason}: {e}")
-                        self.last_captcha_block_reason = reason
-                        if self.proxy_session_enabled and self.current_proxy_base:
-                            self.proxy_session_restart_pending = True
-                            logger.info("🔄 Falha de widget. Renovando Session ID antes de tentar novamente.")
-                        else:
-                            self._blacklist_current_proxy(reason)
-                        return False
-                    
-                    # Estratégia: Recarregar página com novo User-Agent
-                    logger.info(f"🔄 Estratégia de reload ativada (tentativa {widget_load_attempts}/{max_reload_attempts})")
-                    
-                    # Rotacionar User-Agent
-                    user_agents = [
-                        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36",
-                        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/90.0.4430.85 Safari/537.36",
-                        "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:89.0) Gecko/20100101 Firefox/89.0",
-                        "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36"
-                    ]
-                    
-                    new_user_agent = random.choice(user_agents)
-                    logger.info(f"🔧 User-Agent rotacionado para: {new_user_agent[:60]}...")
-                    
-                    # Recarregar com novo User-Agent
-                    try:
-                        await page.context.add_init_script(f"""
-                            Object.defineProperty(navigator, 'userAgent', {{
-                                get() {{ return '{new_user_agent}'; }}
-                            }});
-                        """)
-                        await page.context.set_extra_http_headers(self._build_extra_http_headers(new_user_agent))
-                        logger.info("🔄 Recarregando página com novo User-Agent e headers sec-ch-ua sincronizados...")
-                        await page.reload(wait_until='networkidle')
-                        logger.info("✅ Página recarregada com sucesso")
-                        
-                        # Re-extrair sitekey após reload
-                        sitekey = await self._extract_sitekey_from_full_page_content(page)
-                        if not sitekey:
-                            logger.warning("⚠️ Sitekey não encontrada após reload")
-                            continue
-                        
-                        # Simular interação humana novamente
-                        await self._simulate_human_interaction(page)
-                        await page.wait_for_load_state('networkidle', timeout=wait_timeout)
-                        
-                    except Exception as reload_error:
-                        logger.warning(f"⚠️ Falha ao recarregar página: {reload_error}. Continuando com página atual...")
-                        break
-
             if not await self._humanize_turnstile_click(page):
                 logger.warning("⚠️ Clique humanizado falhou, mas continuando mesmo assim...")
 
@@ -3014,6 +2950,38 @@ class XATBrowserAutomation:
 
             await self._inject_captcha_token(page, token)
             logger.info("✅ Token de captcha injetado na página")
+            
+            # ⏳ CRITICAL: Esperar que o formulário de registro carregue após injetar o token
+            logger.info("⏳ Aguardando carregamento do formulário de registro após resolução de captcha...")
+            try:
+                # Tentar esperar por qualquer um dos campos de entrada de registro
+                registration_form_selectors = [
+                    'input#registername',
+                    'input[name="name"]',
+                    'input#name',
+                    'input[name="user"]',
+                    'input[name="Username"]',
+                    'input#regpass',
+                    'input[name="pass"]',
+                    'input#pass',
+                    'input[name="password"]',
+                ]
+                
+                registration_selector = ', '.join(registration_form_selectors)
+                await page.wait_for_selector(registration_selector, timeout=15000)
+                logger.info("✅ Formulário de registro carregou com sucesso")
+                
+                # Aguardar um pouco mais para garantir que a página está totalmente pronta
+                await self._random_delay(page, 1500, 2500)
+                
+            except Exception as e:
+                logger.warning(f"⚠️ Timeout aguardando formulário de registro após injetar token: {e}")
+                # Tentar verificar se há navegação pendente
+                try:
+                    await page.wait_for_load_state('networkidle', timeout=5000)
+                except Exception:
+                    pass
+            
             return True
 
         except Exception as e:
@@ -3782,7 +3750,7 @@ class XATBrowserAutomation:
             except Exception:
                 logger.warning(f"⚠️ Não foi possível preencher o campo {selector_or_locator}")
 
-    async def _wait_for_registration_fields(self, page: Page, timeout: int = 25000) -> Optional[Locator]:
+    async def _wait_for_registration_fields(self, page: Page, timeout: int = 35000) -> Optional[Locator]:
         """Aguarda o primeiro campo de registro ficar disponível em qualquer iframe."""
         selectors = [
             'input#registername',
