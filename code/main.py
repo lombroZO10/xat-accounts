@@ -669,6 +669,22 @@ class XATAccountGenerator:
                         time.sleep(delay)
                         continue
 
+                    if resposta.status_code == 407:
+                        logger.warning(f"⚠️ Proxy Authentication Required (407) - túnel do proxy falhou, renovando Session ID")
+                        # Pequeno delay antes de tentar renovar Session ID
+                        time.sleep(2)
+                        # Tentar renovar Session ID do proxy atual
+                        if self.current_proxy_base and self._proxy_supports_session(self.current_proxy_base):
+                            logger.info("🔄 Tentando renovar Session ID do proxy após erro 407")
+                            session_ok = self._refresh_proxy_session_with_retries(self.current_proxy_base, max_retries=2, timeout=10)
+                            if session_ok:
+                                logger.info("✅ Session ID renovado com sucesso após erro 407")
+                                # Retry com o proxy renovado
+                                continue
+                            else:
+                                logger.warning("⚠️ Falha ao renovar Session ID após erro 407")
+                        continue
+
                     if resposta.status_code in [403, 503] or any(term in resposta.text.lower() for term in ['checking your browser', 'cloudflare', 'cf-challenge', 'cf-browser-verification']):
                         logger.warning(f"⚠️ Cloudflare ou bloqueio detectado na tentativa {tentativa + 1}/{max_tentativas} (status {resposta.status_code})")
                         if self.scraper:
@@ -3042,12 +3058,11 @@ class XATBrowserAutomation:
 
             # Navegar para a página principal
             home_timeout = self.config['browser_automation'].get('home_timeout', 90000)
-            response = await page.goto(
-                self.BASE_URL,
-                wait_until='domcontentloaded',
-                timeout=home_timeout,
-                headers={'Referer': 'https://www.google.com/'}
-            )
+            
+            # Set Referer header to simulate organic navigation from Google
+            await page.set_extra_http_headers({"Referer": "https://www.google.com/"})
+            
+            response = await page.goto(self.BASE_URL, wait_until='domcontentloaded', timeout=home_timeout)
 
             if response and response.status in [403, 503]:
                 logger.warning(f"⚠️ Bloqueio na página principal (status {response.status})")
