@@ -2557,14 +2557,28 @@ class XATBrowserAutomation:
 
             # Acessar auser3.php (timeout aumentado para proxies residenciais)
             response = await page.goto(self.AUSER_URL, wait_until='networkidle', timeout=45000)
-            
+            final_url = page.url if page else self.AUSER_URL
+            response_status = response.status if response else 'sem resposta'
+            logger.info(f"📡 Navegado para auser3.php: {final_url} status={response_status}")
+
             if response and response.status in [403, 503]:
                 logger.warning(f"⚠️ Bloqueio detectado ao acessar auser3.php: {response.status}")
+                logger.info("🔁 Tentando fallback direto de auser3.php via requisição HTTP após bloqueio do navegador")
+                try:
+                    direct_user_data = await asyncio.to_thread(self.obter_user_data)
+                    if direct_user_data:
+                        logger.info("✅ Fallback direto obteve UserID/k2 com sucesso")
+                        return direct_user_data
+                    logger.warning("⚠️ Fallback direto não obteve UserID/k2 após bloqueio do navegador")
+                except Exception as fallback_error:
+                    logger.warning(f"⚠️ Erro no fallback direto após bloqueio do navegador: {fallback_error}")
                 self._blacklist_current_proxy(f"Bloqueio 403/503 em auser3.php")
                 return None
 
             # Extrair conteúdo HTML
             content = await page.content()
+            if not content or not content.strip():
+                logger.warning("⚠️ Conteúdo de auser3.php via navegador vazio ou ausente")
             soup = BeautifulSoup(content, 'html.parser')
 
             # Procurar por inputs hidden com name="UserId" ou similar
@@ -2683,6 +2697,18 @@ class XATBrowserAutomation:
 
             logger.warning("⚠️ Não foi possível extrair UserID/k2 da resposta")
             logger.info(f"📄 Conteúdo da página (primeiros 500 chars): {content[:500]}")
+
+            # Fallback para extração direta via HTTP se a extração do Playwright falhar
+            logger.info("🔁 Tentando fallback direto de auser3.php via requisição HTTP")
+            try:
+                direct_user_data = await asyncio.to_thread(self.obter_user_data)
+                if direct_user_data:
+                    logger.info("✅ Fallback direto obteve UserID/k2 com sucesso")
+                    return direct_user_data
+                logger.warning("⚠️ Fallback direto não obteve UserID/k2")
+            except Exception as fallback_error:
+                logger.warning(f"⚠️ Erro no fallback direto de auser3.php: {fallback_error}")
+
             return None
 
         except Exception as e:
