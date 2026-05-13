@@ -3401,6 +3401,14 @@ class XATBrowserAutomation:
                 logger.warning(f"⚠️ Não foi possível marcar terms: {e}")
 
             await page.wait_for_timeout(1500)
+            
+            # 🔥 NOVO: Detectar e resolver novo Turnstile no formulário de registro
+            logger.info("🔍 Verificando se há novo Turnstile no formulário de registro...")
+            has_additional_captcha = await self._detect_and_resolve_additional_turnstile(page)
+            if has_additional_captcha:
+                logger.info("✅ Novo Turnstile resolvido com sucesso")
+            else:
+                logger.info("ℹ️ Nenhum Turnstile adicional detectado no formulário")
 
             # Upgrade Final: Safety Gate + Clique Humanizado + Loop de Re-tentativa
             captcha_retry_count = 0
@@ -4061,6 +4069,59 @@ class XATBrowserAutomation:
             return 'Apple Computer, Inc.'
         return 'Google Inc.'
 
+    async def _detect_and_resolve_additional_turnstile(self, page: Page) -> bool:
+        """
+        Detecta se há um novo Turnstile no formulário de registro (após preencher campos)
+        e resolve automaticamente se encontrado.
+        Retorna True se detectou e resolveu, False caso contrário.
+        """
+        try:
+            logger.info("🔍 Procurando novo Turnstile no formulário de registro...")
+            
+            # Verificar se há um novo sitekey diferente ou outro Turnstile
+            new_sitekey = await self._extract_sitekey_from_page(page)
+            
+            if not new_sitekey:
+                logger.debug("  ℹ️ Nenhum sitekey Turnstile encontrado no formulário")
+                return False
+            
+            logger.info(f"🔓 Novo sitekey Turnstile detectado: {new_sitekey}")
+            
+            # Simular clique humanizado no novo widget
+            if not await self._humanize_turnstile_click(page):
+                logger.warning("⚠️ Clique humanizado falhou, mas continuando mesmo assim...")
+            
+            # Aguardar um pouco
+            await self._random_delay(page, 1800, 2500)
+            
+            # Obter configuração de página
+            page_url = page.url
+            payload = await self._extract_turnstile_payload(page)
+            user_agent = await page.evaluate("navigator.userAgent")
+            
+            logger.info(f"🔐 Resolvendo novo Turnstile (sitekey={new_sitekey[:20]}..., url={page_url})")
+            
+            # Resolver com 2Captcha
+            token = self._resolver_recaptcha(new_sitekey, page_url, payload, user_agent=user_agent)
+            if not token:
+                logger.warning("⚠️ Novo Turnstile não foi resolvido pelo 2Captcha")
+                return False
+            
+            logger.info(f"✅ Novo Turnstile resolvido: {token[:30]}...")
+            
+            # Injetar o token
+            await self._inject_captcha_token(page, token)
+            logger.info("✅ Novo token injetado com sucesso")
+            
+            # Aguardar validação
+            await self._random_delay(page, 1500, 2500)
+            
+            return True
+            
+        except Exception as e:
+            logger.warning(f"⚠️ Erro ao detectar/resolver novo Turnstile: {e}")
+            return False
+
     async def _validate_captcha_success(self, page: Page, timeout_seconds: int = 30) -> bool:
         """
         Safety Gate: Valida visualmente se o Turnstile foi resolvido com sucesso.
@@ -4069,7 +4130,12 @@ class XATBrowserAutomation:
         logger.info(f"🔒 Safety Gate: Validando sucesso do captcha por até {timeout_seconds}s...")
 
         start_time = asyncio.get_event_loop().time()
+        check_count = 0
+        
         while (asyncio.get_event_loop().time() - start_time) < timeout_seconds:
+            check_count += 1
+            elapsed = int(asyncio.get_event_loop().time() - start_time)
+            
             try:
                 # Verificar se o campo cf-turnstile-response tem um token longo
                 token_value = await page.evaluate("""
@@ -4078,9 +4144,12 @@ class XATBrowserAutomation:
                         return field ? field.value : '';
                     }
                 """)
+                
+                token_len = len(token_value) if token_value else 0
+                logger.debug(f"  [Safety Gate - Check #{check_count}, {elapsed}s] Token length: {token_len} chars")
 
                 if token_value and len(token_value) > 50:  # Token válido é longo
-                    logger.info("✅ Safety Gate: Token válido detectado no campo cf-turnstile-response")
+                    logger.info(f"✅ Safety Gate: Token válido detectado no campo cf-turnstile-response ({token_len} chars)")
 
                     # Verificar indicador visual de sucesso no iframe do Turnstile
                     success_indicator = await page.evaluate("""
@@ -4120,14 +4189,31 @@ class XATBrowserAutomation:
                         logger.info("✅ Safety Gate: Callback do Turnstile foi disparado com sucesso")
                         return True
 
-                    logger.debug("⏳ Safety Gate: Token presente mas aguardando indicador visual ou callback...")
+                    logger.debug(f"  [Safety Gate - Check #{check_count}] Token present but waiting for visual indicator or callback...")
                 else:
-                    logger.debug("⏳ Safety Gate: Aguardando token no campo cf-turnstile-response...")
+                    logger.debug(f"  [Safety Gate - Check #{check_count}] Waiting for token (current: {token_len} chars)...")
+                    
             except Exception as e:
-                logger.debug(f"⏳ Safety Gate: Erro na validação (continuando): {e}")
-                await page.wait_for_timeout(1000)
+                logger.debug(f"  [Safety Gate - Check #{check_count}] Exception during validation (continuing): {e}")
+            
+            await page.wait_for_timeout(1000)
 
-        logger.warning(f"❌ Safety Gate: Timeout de {timeout_seconds}s atingido - captcha não validado")
+        logger.warning(f"❌ Safety Gate: Timeout de {timeout_seconds}s atingido - captcha não validado após {check_count} verificações")
+        
+        # Tirar screenshot do estado final
+        try:
+            screenshot_path = "safety_gate_timeout.png"
+            await page.screenshot(path=screenshot_path)
+            logger.info(f"📸 Screenshot do Safety Gate timeout salva em {screenshot_path}")
+            
+            html_path = "safety_gate_timeout.html"
+            html_content = await page.content()
+            with open(html_path, 'w', encoding='utf-8') as f:
+                f.write(html_content)
+            logger.info(f"📝 HTML do Safety Gate timeout salva em {html_path}")
+        except Exception as e:
+            logger.warning(f"⚠️ Erro ao salvar debug info: {e}")
+        
         return False
 
     async def _humanize_turnstile_click(self, page: Page) -> bool:
@@ -4412,6 +4498,37 @@ class XATBrowserAutomation:
             f"turnstile_execute={callback_stats.get('turnstileExecuteInvoked')} "
             f"callbackFired={callback_stats.get('callbackFired')}"
         )
+        
+        # Verificar se o token foi realmente injetado
+        try:
+            injected_token = await page.evaluate("""
+                () => {
+                    const fields = [
+                        document.querySelector('input[name="cf-turnstile-response"]'),
+                        document.querySelector('textarea[name="cf-turnstile-response"]'),
+                        document.querySelector('input[name="g-recaptcha-response"]'),
+                        document.querySelector('textarea[name="g-recaptcha-response"]')
+                    ];
+                    for (const field of fields) {
+                        if (field && field.value && field.value.length > 30) {
+                            return {
+                                field: field.tagName + '[name="' + field.name + '"]',
+                                length: field.value.length,
+                                preview: field.value.substring(0, 40) + '...'
+                            };
+                        }
+                    }
+                    return null;
+                }
+            """)
+            
+            if injected_token:
+                logger.info(f"✅ Token injetado em {injected_token['field']} ({injected_token['length']} chars): {injected_token['preview']}")
+            else:
+                logger.warning("⚠️ Token não foi encontrado em nenhum campo após injeção!")
+                
+        except Exception as e:
+            logger.debug(f"⚠️ Erro ao verificar injeção de token: {e}")
 
         # ⚠️ FEATURE 2: Aguarda um momento MAIOR para garantir que o callback foi processado
         # Isto dá tempo para o JavaScript do xat processar a notificação cf_callback/Turnstile
