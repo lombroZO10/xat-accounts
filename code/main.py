@@ -2845,13 +2845,22 @@ class XATBrowserAutomation:
 
             await page.wait_for_load_state('networkidle', timeout=wait_timeout)
 
-            if await self._detect_cloudflare_challenge(page, 'captcha'):
-                reason = "Cloudflare challenge detectado antes de iniciar resolução de captcha"
-                logger.warning(f"⚠️ {reason}")
-                self.last_captcha_block_reason = reason
-                return False
+            sitekey = await self._extract_sitekey_from_page(page)
+            if sitekey:
+                logger.info(f"ℹ️ Sitekey Turnstile detectada antes de checar bloqueio: {sitekey}")
+            else:
+                widget_selector = 'iframe[src*="turnstile"], iframe[src*="captcha"], [data-sitekey], .cf-turnstile, .g-recaptcha'
+                try:
+                    logger.info(f"🔍 Aguardando widget Turnstile por até {wait_timeout // 1000}s")
+                    await page.wait_for_selector(widget_selector, timeout=wait_timeout)
+                    logger.info("✅ Widget Turnstile detectado via seletor")
+                except Exception as e:
+                    logger.warning(f"⚠️ Widget Turnstile não detectado via seletor: {e}")
 
-            sitekey = await self._extract_sitekey_from_full_page_content(page)
+                sitekey = await self._extract_sitekey_from_page(page)
+                if not sitekey:
+                    sitekey = await self._extract_sitekey_from_full_page_content(page)
+
             if sitekey:
                 if not self._is_allowed_sitekey(sitekey):
                     logger.warning(f"⚠️ Sitekey inválida detectada no HTML e ignorada: {sitekey}")
@@ -3069,18 +3078,26 @@ class XATBrowserAutomation:
         try:
             title = (await page.title() or '').lower()
             if not title or 'just a moment' in title or 'checking your browser' in title or 'cloudflare' in title or 'browser integrity' in title:
-                logger.warning(f"⚠️ Cloudflare challenge detectado na {context} (título: '{title}')")
-                try:
-                    await page.wait_for_load_state('networkidle', timeout=15000)
-                    await self._random_delay(page, 2500, 4000)
-                except Exception:
-                    pass
-                return True
+                sitekey = await self._extract_sitekey_from_page(page)
+                if sitekey:
+                    logger.info(f"ℹ️ Página de Cloudflare aparenta ter widget Turnstile/sitekey: {sitekey}. Ignorando falso positivo.")
+                else:
+                    logger.warning(f"⚠️ Cloudflare challenge detectado na {context} (título: '{title}')")
+                    try:
+                        await page.wait_for_load_state('networkidle', timeout=15000)
+                        await self._random_delay(page, 2500, 4000)
+                    except Exception:
+                        pass
+                    return True
 
             content = (await page.content()).lower()
             if any(marker in content for marker in ['cloudflare', 'checking your browser', 'verify you are human', 'browser integrity', 'access denied', 'forbidden', 'captcha']):
-                logger.warning(f"⚠️ Cloudflare challenge detectado na {context} via conteúdo da página")
-                return True
+                sitekey = await self._extract_sitekey_from_page(page)
+                if sitekey:
+                    logger.info(f"ℹ️ Conteúdo menciona Cloudflare, mas widget Turnstile/sitekey está presente ({sitekey}). Ignorando falso positivo.")
+                else:
+                    logger.warning(f"⚠️ Cloudflare challenge detectado na {context} via conteúdo da página")
+                    return True
         except Exception as e:
             logger.debug(f"⚠️ Erro ao detectar Cloudflare challenge na {context}: {e}")
         return False
