@@ -12,7 +12,7 @@ logger = logging.getLogger(__name__)
 class AdsPowerManager:
     """Manages communication with the local AdsPower API."""
 
-    def __init__(self, api_url: str = "http://127.0.0.1:50325", api_key: Optional[str] = None):
+    def __init__(self, api_url: str = "http://127.0.0.1:20725", api_key: Optional[str] = None):
         self.api_url = api_url.rstrip('/')
         self.session = requests.Session()
         self.headers: Dict[str, str] = {}
