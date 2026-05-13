@@ -1467,6 +1467,7 @@ class XATBrowserAutomation:
         self.context = None
         self.page = None
         self.ads_manager: Optional[AdsPowerManager] = None
+        self.ads_power_cdp_endpoint: Optional[str] = None
         self.use_ads_power = self.config.get('browser_automation', {}).get('use_ads_power', True)
         self.ads_power_api_url = self.config.get('browser_automation', {}).get('ads_power_api_url', 'http://127.0.0.1:50325')
         self.ads_power_api_key = self.config.get('browser_automation', {}).get('ads_power_api_key')
@@ -2123,7 +2124,14 @@ class XATBrowserAutomation:
         if self.context:
             await self.context.close()
             self.context = None
-        if self.browser:
+
+        keep_ads_browser = False
+        if self.use_ads_power and self.browser:
+            keep_ads_browser = getattr(self.browser, 'is_connected', lambda: False)()
+            if not keep_ads_browser:
+                await self.browser.close()
+                self.browser = None
+        elif self.browser:
             await self.browser.close()
             self.browser = None
 
@@ -2147,49 +2155,52 @@ class XATBrowserAutomation:
         try:
             if self.use_ads_power:
                 try:
-                    if not self.ads_manager:
-                        self.ads_manager = AdsPowerManager(
-                            api_url=self.ads_power_api_url,
-                            api_key=self.ads_power_api_key
-                        )
+                        if self.browser and getattr(self.browser, 'is_connected', lambda: False)():
+                            logger.info("🔁 Reutilizando AdsPower CDP browser existente")
+                            self.context = self.browser.contexts[0] if self.browser.contexts else None
+                        else:
+                            if not self.ads_manager:
+                                self.ads_manager = AdsPowerManager(
+                                    api_url=self.ads_power_api_url,
+                                    api_key=self.ads_power_api_key
+                                )
 
-                    logger.info(f"🔌 Iniciando AdsPower browser via API local: {self.ads_power_api_url}")
-                    ws_endpoint = await asyncio.to_thread(
-                        self.ads_manager.start_browser,
-                        self.ads_power_profile_id,
-                        self.ads_power_profile_name
-                    )
-                    logger.info(f"✅ AdsPower retornou endpoint CDP: {ws_endpoint}")
+                            logger.info(f"🔌 Iniciando AdsPower browser via API local: {self.ads_power_api_url}")
+                            ws_endpoint = await asyncio.to_thread(
+                                self.ads_manager.start_browser,
+                                self.ads_power_profile_id,
+                                self.ads_power_profile_name
+                            )
+                            logger.info(f"✅ AdsPower retornou endpoint CDP: {ws_endpoint}")
+                            self.ads_power_cdp_endpoint = ws_endpoint
+                            self.browser = await self.playwright.chromium.connect_over_cdp(ws_endpoint)
+                            self.context = self.browser.contexts[0] if self.browser.contexts else None
 
-                    self.browser = await self.playwright.chromium.connect_over_cdp(ws_endpoint)
-                    self.context = self.browser.contexts[0] if self.browser.contexts else None
+                        if not self.context and self.browser:
+                            try:
+                                self.context = await self.browser.new_context()
+                            except Exception as ctx_error:
+                                logger.warning(f"⚠️ Falha ao criar novo contexto AdsPower: {ctx_error}")
 
-                    if not self.context:
-                        try:
-                            self.context = await self.browser.new_context()
-                        except Exception as ctx_error:
-                            logger.warning(f"⚠️ Falha ao criar novo contexto AdsPower: {ctx_error}")
-
-                    if self.context:
-                        try:
-                            self.page = self.context.pages[0] if self.context.pages else await self.context.new_page()
-                        except Exception as page_error:
-                            logger.warning(f"⚠️ Falha ao criar nova página no contexto AdsPower: {page_error}")
+                        if self.context:
+                            try:
+                                self.page = self.context.pages[0] if self.context.pages else await self.context.new_page()
+                            except Exception as page_error:
+                                logger.warning(f"⚠️ Falha ao criar nova página no contexto AdsPower: {page_error}")
+                                self.page = None
+                        else:
                             self.page = None
-                    else:
-                        self.page = None
 
-                    if not self.page:
-                        try:
-                            self.page = await self.browser.new_page()
-                            self.context = self.page.context
-                        except Exception as page_error:
-                            logger.warning(f"⚠️ Falha ao criar nova página direta no browser AdsPower: {page_error}")
-                            raise
+                        if not self.page and self.browser:
+                            try:
+                                self.page = await self.browser.new_page()
+                                self.context = self.page.context
+                            except Exception as page_error:
+                                logger.warning(f"⚠️ Falha ao criar nova página direta no browser AdsPower: {page_error}")
+                                raise
 
-                    await self.context.route('**/*', self._block_unnecessary_assets)
-                    logger.info("✅ Conectado ao AdsPower via CDP")
-                    return
+                        if self.context:
+                            await self.context.route('**/*', self._block_unnecessary_assets)
 
                 except Exception as ads_error:
                     logger.warning(f"⚠️ AdsPower falhou ({ads_error}), fazendo fallback para Playwright normal")
