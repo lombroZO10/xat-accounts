@@ -3541,7 +3541,100 @@ class XATBrowserAutomation:
 
             logger.info("✅ Aguarde concluído; enviando o registro imediatamente a seguir")
 
-            # 🔥 FORCE SUBMIT INTELIGENTE - Múltiplas estratégias de fallback
+            # � PRÉ-SUBMIT DEBUG: Capturar estado do formulário antes do envio
+            logger.info("🔍 ===== DEBUG PRÉ-SUBMIT: Capturando estado do formulário =====")
+            pre_submit_state = await page.evaluate("""
+                () => {
+                    const xat_token_fields = [
+                        '#registercap input[name="cf-turnstile-response"]',
+                        '#registercap textarea[name="cf-turnstile-response"]',
+                        'form#regform input[name="cf-turnstile-response"]',
+                        'form#regform textarea[name="cf-turnstile-response"]',
+                        'input[name="cf-turnstile-response"]',
+                        'textarea[name="cf-turnstile-response"]'
+                    ];
+                    
+                    const tokenInfo = {};
+                    xat_token_fields.forEach(selector => {
+                        const field = document.querySelector(selector);
+                        if (field) {
+                            tokenInfo[selector] = {
+                                has_value: !!field.value,
+                                value_length: field.value ? field.value.length : 0,
+                                first_50: field.value ? field.value.substring(0, 50) : null,
+                                visible: field.offsetParent !== null
+                            };
+                        }
+                    });
+                    
+                    const form = document.querySelector('form#regform') || document.querySelector('form');
+                    const form_data = new FormData(form);
+                    const form_entries = {};
+                    for (const [key, value] of form_data.entries()) {
+                        if (key.includes('captcha') || key.includes('turnstile') || key.includes('recaptcha')) {
+                            form_entries[key] = {
+                                value_length: value.length,
+                                first_50: value.substring(0, 50)
+                            };
+                        } else {
+                            form_entries[key] = typeof value === 'string' ? value : '[FILE]';
+                        }
+                    }
+                    
+                    return {
+                        token_fields: tokenInfo,
+                        form_data: form_entries,
+                        form_action: form ? form.action : null,
+                        form_method: form ? form.method : null
+                    };
+                }
+            """)
+            
+            logger.info(f"🔍 Token Fields Pre-Submit: {pre_submit_state.get('token_fields')}")
+            logger.info(f"🔍 Form Data (captcha-related): {pre_submit_state.get('form_data')}")
+            logger.info(f"🔍 Form Action: {pre_submit_state.get('form_action')}")
+            logger.info(f"🔍 Form Method: {pre_submit_state.get('form_method')}")
+
+            # 🔍 Interceptar requisições POST após o submit
+            post_requests = []
+            post_responses = []
+            
+            async def handle_request(request):
+                if request.method == 'POST':
+                    try:
+                        post_body = await request.post_data()
+                        if post_body:
+                            post_requests.append({
+                                'url': request.url,
+                                'method': request.method,
+                                'body_size': len(post_body),
+                                'body_preview': post_body[:200] if isinstance(post_body, str) else str(post_body)[:200]
+                            })
+                            logger.info(f"🔍 POST Request interceptado: URL={request.url}, body_size={len(post_body)}")
+                    except:
+                        pass
+            
+            async def handle_response(response):
+                if response.request.method == 'POST':
+                    try:
+                        response_text = await response.text()
+                        post_responses.append({
+                            'url': response.url,
+                            'status': response.status,
+                            'body_size': len(response_text),
+                            'body_preview': response_text[:500]
+                        })
+                        logger.info(f"🔍 POST Response interceptado: URL={response.url}, status={response.status}, size={len(response_text)}")
+                        if response.status != 200:
+                            logger.warning(f"⚠️ POST Error Response (status {response.status}): {response_text[:500]}")
+                    except:
+                        pass
+            
+            # Registrar handlers
+            page.on('request', handle_request)
+            page.on('response', handle_response)
+
+            # �🔥 FORCE SUBMIT INTELIGENTE - Múltiplas estratégias de fallback
             submit_found = False
             submit_selectors = [
                 'a#butregister',  # Link de submit (ID real do XAT)
@@ -3687,6 +3780,25 @@ class XATBrowserAutomation:
             logger.info("⏳ Aguardando 3s após o clique para a mensagem final aparecer...")
             await page.wait_for_timeout(3000)
 
+            # 🔍 PÓS-SUBMIT DEBUG: Capturar resposta e estado da página
+            logger.info("🔍 ===== DEBUG PÓS-SUBMIT: Capturando estado da página =====")
+            logger.info(f"🔍 POST Requests Interceptados: {len(post_requests)}")
+            for i, req in enumerate(post_requests):
+                logger.info(f"  [{i+1}] URL: {req['url']}, body_size: {req['body_size']}, preview: {req['body_preview']}")
+            
+            logger.info(f"🔍 POST Responses Interceptadas: {len(post_responses)}")
+            for i, resp in enumerate(post_responses):
+                logger.info(f"  [{i+1}] URL: {resp['url']}, status: {resp['status']}, size: {resp['body_size']}")
+                if resp['status'] != 200:
+                    logger.warning(f"⚠️ Response Body ({resp['status']}): {resp['body_preview']}")
+            
+            # Desregistrar handlers
+            try:
+                page.remove_listener('request', handle_request)
+                page.remove_listener('response', handle_response)
+            except:
+                pass
+
             # Captura de diagnóstico após o submit, especialmente útil quando o bot sai cedo demais
             screenshot_path = f"post_submit_{username}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.png"
             try:
@@ -3697,6 +3809,65 @@ class XATBrowserAutomation:
 
             await page.wait_for_timeout(2000)
             await page.wait_for_load_state('networkidle', timeout=15000)
+            
+            # 🔍 ANÁLISE DE ERRO DETALHADA PÓS-SUBMIT
+            logger.info("🔍 ===== DEBUG PÓS-RESPOSTA: Analisando página de resposta =====")
+            post_response_state = await page.evaluate("""
+                () => {
+                    // Procurar erro mais específico
+                    const error_selectors = [
+                        'div.alert-danger',
+                        '.alert.alert-danger',
+                        '.popover-body',
+                        '#errore-msg',
+                        '.error',
+                        '[role="alert"]'
+                    ];
+                    
+                    const errors_found = {};
+                    error_selectors.forEach(selector => {
+                        const el = document.querySelector(selector);
+                        if (el) {
+                            errors_found[selector] = {
+                                text: el.textContent ? el.textContent.trim() : '[empty]',
+                                html: el.innerHTML ? el.innerHTML.substring(0, 200) : '[empty]',
+                                visible: el.offsetParent !== null
+                            };
+                        }
+                    });
+                    
+                    // Verificar URL
+                    const url = window.location.href;
+                    
+                    // Verificar se há sucesso
+                    const success_indicators = [
+                        'welcome', 'home', 'success', 'created', 'registered',
+                        'conta criada', 'bem-vindo', 'sucesso'
+                    ];
+                    const page_text = document.body.textContent.toLowerCase();
+                    const has_success = success_indicators.some(ind => page_text.includes(ind));
+                    
+                    // Capturar todo o body text (primeiros 1000 chars)
+                    const body_text = document.body.textContent.substring(0, 1000);
+                    
+                    return {
+                        current_url: url,
+                        errors_found: errors_found,
+                        has_success: has_success,
+                        body_text: body_text
+                    };
+                }
+            """)
+            
+            logger.info(f"🔍 Current URL: {post_response_state.get('current_url')}")
+            logger.info(f"🔍 Has Success Indicators: {post_response_state.get('has_success')}")
+            if post_response_state.get('errors_found'):
+                for selector, error_info in post_response_state['errors_found'].items():
+                    logger.warning(f"⚠️ Error Element [{selector}]:")
+                    logger.warning(f"   Text: {error_info['text']}")
+                    logger.warning(f"   HTML: {error_info['html']}")
+            logger.info(f"🔍 Body Text (first 500): {post_response_state.get('body_text')[:500]}")
+
             error_message = await self._monitor_submission_result(page)
             if error_message:
                 screenshot_path = f"erro_submit_{username}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.png"
