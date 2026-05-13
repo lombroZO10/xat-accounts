@@ -3423,7 +3423,7 @@ class XATBrowserAutomation:
                 logger.info("⏳ Aguardando processamento do token injetado...")
 
                 # 2. Safety Gate: Validar sucesso do captcha por até 20 segundos
-                if await self._validate_captcha_success(page, timeout_seconds=30):
+                if await self._validate_captcha_success(page, timeout_seconds=15):
                     logger.info("✅ Captcha validado com sucesso - prosseguindo para submissão")
                     captcha_success = True
                 else:
@@ -4122,12 +4122,30 @@ class XATBrowserAutomation:
             logger.warning(f"⚠️ Erro ao detectar/resolver novo Turnstile: {e}")
             return False
 
-    async def _validate_captcha_success(self, page: Page, timeout_seconds: int = 30) -> bool:
+    async def _validate_captcha_success(self, page: Page, timeout_seconds: int = 15) -> bool:
         """
-        Safety Gate: Valida visualmente se o Turnstile foi resolvido com sucesso.
-        Verifica se cf-turnstile-response tem valor longo e se há indicador visual de sucesso.
+        Safety Gate: Valida visualmente se o Turnstile/reCAPTCHA foi resolvido com sucesso.
+        
+        IMPORTANTE: Procura APENAS em campos reais do XAT reCAPTCHA (não em tokens órfãos aleatórios).
+        Valida que o token está associado a um widget visível na página.
         """
-        logger.info(f"🔒 Safety Gate: Validando sucesso do captcha por até {timeout_seconds}s...")
+        logger.info(f"🔒 Safety Gate: Validando sucesso do captcha XAT por até {timeout_seconds}s...")
+
+        # Campos possíveis do XAT reCAPTCHA/ReCaptcha em ordem de prioridade
+        xat_captcha_fields = [
+            ('#registercap input[name="cf-turnstile-response"]', 'Cloudflare Turnstile (input, registercap)'),
+            ('#registercap textarea[name="cf-turnstile-response"]', 'Cloudflare Turnstile (textarea, registercap)'),
+            ('#registercap input[name="g-recaptcha-response"]', 'Google reCAPTCHA (input, registercap)'),
+            ('#registercap textarea[name="g-recaptcha-response"]', 'Google reCAPTCHA (textarea, registercap)'),
+            ('form#regform input[name="cf-turnstile-response"]', 'Cloudflare Turnstile (input, regform)'),
+            ('form#regform textarea[name="cf-turnstile-response"]', 'Cloudflare Turnstile (textarea, regform)'),
+            ('form#regform input[name="g-recaptcha-response"]', 'Google reCAPTCHA (input, regform)'),
+            ('form#regform textarea[name="g-recaptcha-response"]', 'Google reCAPTCHA (textarea, regform)'),
+            ('input[name="cf-turnstile-response"]', 'Cloudflare Turnstile (input)'),
+            ('textarea[name="cf-turnstile-response"]', 'Cloudflare Turnstile (textarea)'),
+            ('input[name="g-recaptcha-response"]', 'Google reCAPTCHA (input)'),
+            ('textarea[name="g-recaptcha-response"]', 'Google reCAPTCHA (textarea)'),
+        ]
 
         start_time = asyncio.get_event_loop().time()
         check_count = 0
@@ -4137,70 +4155,105 @@ class XATBrowserAutomation:
             elapsed = int(asyncio.get_event_loop().time() - start_time)
             
             try:
-                # Verificar se o campo cf-turnstile-response tem um token longo
-                token_value = await page.evaluate("""
-                    () => {
-                        const field = document.querySelector('input[name="cf-turnstile-response"], textarea[name="cf-turnstile-response"]');
-                        return field ? field.value : '';
-                    }
-                """)
-                
-                token_len = len(token_value) if token_value else 0
-                logger.debug(f"  [Safety Gate - Check #{check_count}, {elapsed}s] Token length: {token_len} chars")
-
-                if token_value and len(token_value) > 50:  # Token válido é longo
-                    logger.info(f"✅ Safety Gate: Token válido detectado no campo cf-turnstile-response ({token_len} chars)")
-
-                    # Verificar indicador visual de sucesso no iframe do Turnstile
-                    success_indicator = await page.evaluate("""
-                        () => {
-                            const iframes = document.querySelectorAll('iframe[src*="challenges.cloudflare.com"]');
-                            for (const iframe of iframes) {
-                                try {
-                                    const iframeDoc = iframe.contentDocument || iframe.contentWindow.document;
-                                    if (iframeDoc) {
-                                        const successElements = iframeDoc.querySelectorAll('[class*="success"], [class*="checkmark"], .checkmark, [data-success]');
-                                        if (successElements.length > 0) {
-                                            return true;
-                                        }
-                                        const textContent = iframeDoc.body ? iframeDoc.body.textContent : '';
-                                        if (textContent.includes('success') || textContent.includes('verified') || textContent.includes('✓')) {
-                                            return true;
-                                        }
-                                    }
-                                } catch (e) {
-                                    // Cross-origin iframe, não conseguimos acessar
-                                }
+                # Procurar token em CADA campo específico do XAT
+                validation_result = await page.evaluate(
+                    """
+                    (fields_specs) => {
+                        const results = [];
+                        
+                        for (const [selector, fieldType] of fields_specs) {
+                            const field = document.querySelector(selector);
+                            if (!field) {
+                                results.push({
+                                    selector: selector,
+                                    fieldType: fieldType,
+                                    found: false,
+                                    tokenLength: 0,
+                                    hasWidget: false,
+                                    fieldValue: null
+                                });
+                                continue;
                             }
-                            return false;
+                            
+                            const tokenValue = field.value || '';
+                            const tokenLength = tokenValue.length;
+                            
+                            // Verificar se há um widget visível associado a este campo
+                            let hasWidget = false;
+                            try {
+                                // Procurar iframe de Turnstile/reCAPTCHA na página
+                                const turnstileIframe = document.querySelector('iframe[src*="challenges.cloudflare.com"], iframe[src*="turnstile"], iframe[src*="recaptcha"], iframe[src*="captcha"]');
+                                if (turnstileIframe && turnstileIframe.offsetParent !== null) {
+                                    hasWidget = true;
+                                }
+                                
+                                // Verificar data-sitekey (indicador de widget)
+                                const widgetElement = document.querySelector('[data-sitekey], .cf-turnstile, .g-recaptcha');
+                                if (widgetElement && widgetElement.offsetParent !== null) {
+                                    hasWidget = true;
+                                }
+                            } catch (e) {
+                                // Ignorar erros ao verificar widget
+                            }
+                            
+                            results.push({
+                                selector: selector,
+                                fieldType: fieldType,
+                                found: true,
+                                tokenLength: tokenLength,
+                                hasWidget: hasWidget,
+                                fieldValue: tokenValue.substring(0, 50) + (tokenValue.length > 50 ? '...' : '')
+                            });
                         }
-                    """)
-
-                    if success_indicator:
-                        logger.info("✅ Safety Gate: Indicador visual de sucesso detectado no Turnstile")
-                        return True
-
-                    callback_fired = await page.evaluate("""
-                        () => {
-                            return !!window.__playwright_turnstile_callback_fired;
-                        }
-                    """)
-                    if callback_fired:
-                        logger.info("✅ Safety Gate: Callback do Turnstile foi disparado com sucesso")
-                        return True
-
-                    logger.debug(f"  [Safety Gate - Check #{check_count}] Token present but waiting for visual indicator or callback...")
-                else:
-                    logger.debug(f"  [Safety Gate - Check #{check_count}] Waiting for token (current: {token_len} chars)...")
-                    
+                        
+                        return results;
+                    }
+                    """,
+                    xat_captcha_fields
+                )
+                
+                # Processar resultados
+                for field_info in validation_result:
+                    if field_info['found'] and field_info['tokenLength'] > 50 and field_info['hasWidget']:
+                        # Aceitamos somente campos reais do XAT dentro de #registercap ou form#regform
+                        if field_info['selector'].startswith('#registercap') or field_info['selector'].startswith('form#regform'):
+                            logger.info(
+                                f"✅ Safety Gate: Token VÁLIDO encontrado! "
+                                f"Campo: {field_info['selector']} | "
+                                f"Tipo: {field_info['fieldType']} | "
+                                f"Comprimento: {field_info['tokenLength']} chars | "
+                                f"Widget visível: SIM | "
+                                f"Preview: {field_info['fieldValue']}"
+                            )
+                            
+                            # Validação extra: verificar callback disparado
+                            callback_fired = await page.evaluate("() => !!window.__playwright_turnstile_callback_fired")
+                            if callback_fired:
+                                logger.info("✅ Safety Gate: Callback do Turnstile foi disparado com sucesso")
+                            
+                            return True
+                        else:
+                            logger.warning(
+                                f"⚠️ Safety Gate: Token encontrado em campo genérico, mas não aceito como campo XAT real: {field_info['selector']}"
+                            )
+                    elif field_info['found']:
+                        logger.debug(
+                            f"  [Check #{check_count}, {elapsed}s] Campo: {field_info['selector']} | "
+                            f"Token: {field_info['tokenLength']} chars | "
+                            f"Widget: {'SIM' if field_info['hasWidget'] else 'NÃO'}"
+                        )
+                
             except Exception as e:
-                logger.debug(f"  [Safety Gate - Check #{check_count}] Exception during validation (continuing): {e}")
+                logger.debug(f"  [Safety Gate - Check #{check_count}] Erro durante validação (continuando): {e}")
             
             await page.wait_for_timeout(1000)
 
-        logger.warning(f"❌ Safety Gate: Timeout de {timeout_seconds}s atingido - captcha não validado após {check_count} verificações")
+        logger.warning(
+            f"❌ Safety Gate: Timeout de {timeout_seconds}s atingido após {check_count} verificações. "
+            f"Nenhum token válido com widget visível foi encontrado nos campos do XAT reCAPTCHA."
+        )
         
-        # Tirar screenshot do estado final
+        # Tirar screenshot do estado final para debug
         try:
             screenshot_path = "safety_gate_timeout.png"
             await page.screenshot(path=screenshot_path)
@@ -4211,6 +4264,22 @@ class XATBrowserAutomation:
             with open(html_path, 'w', encoding='utf-8') as f:
                 f.write(html_content)
             logger.info(f"📝 HTML do Safety Gate timeout salva em {html_path}")
+            
+            # Também salvar informações dos campos encontrados
+            fields_debug = await page.evaluate("""
+                () => {
+                    const allInputs = document.querySelectorAll('input[name*="captcha"], input[name*="recaptcha"], input[name*="cf-turnstile"], textarea[name*="captcha"], textarea[name*="recaptcha"], textarea[name*="cf-turnstile"]');
+                    return Array.from(allInputs).map(el => ({
+                        tag: el.tagName,
+                        name: el.name,
+                        type: el.type,
+                        valueLength: el.value ? el.value.length : 0,
+                        visible: el.offsetParent !== null
+                    }));
+                }
+            """)
+            logger.warning(f"🔍 Campos de captcha encontrados na página: {fields_debug}")
+            
         except Exception as e:
             logger.warning(f"⚠️ Erro ao salvar debug info: {e}")
         
@@ -4297,24 +4366,78 @@ class XATBrowserAutomation:
                     element.dispatchEvent(new Event('blur', { bubbles: true }));
                 };
 
+                const findOrCreateField = (selector) => {
+                    let element = document.querySelector(selector);
+                    if (element) {
+                        return { element, created: false };
+                    }
+                    const tag = selector.includes('textarea') ? 'textarea' : 'input';
+                    const name = selector.includes('cf-turnstile-response') ? 'cf-turnstile-response' : 'g-recaptcha-response';
+                    const container = document.querySelector('#registercap') || document.querySelector('form#regform') || document.body;
+                    element = document.createElement(tag);
+                    element.setAttribute('name', name);
+                    element.style.display = 'none';
+                    container.appendChild(element);
+                    return { element, created: true };
+                };
+
                 const selectors = [
+                    '#registercap textarea[name="cf-turnstile-response"]',
+                    '#registercap input[name="cf-turnstile-response"]',
+                    '#registercap textarea[name="g-recaptcha-response"]',
+                    '#registercap input[name="g-recaptcha-response"]',
+                    'form#regform textarea[name="cf-turnstile-response"]',
+                    'form#regform input[name="cf-turnstile-response"]',
+                    'form#regform textarea[name="g-recaptcha-response"]',
+                    'form#regform input[name="g-recaptcha-response"]',
                     'textarea[name="cf-turnstile-response"]',
                     'input[name="cf-turnstile-response"]',
                     'textarea[name="g-recaptcha-response"]',
                     'input[name="g-recaptcha-response"]'
                 ];
 
+                const injected = [];
                 selectors.forEach(selector => {
-                    let element = document.querySelector(selector);
-                    if (!element) {
-                        const tag = selector.startsWith('textarea') ? 'textarea' : 'input';
-                        element = document.createElement(tag);
-                        element.setAttribute('name', selector.includes('cf-turnstile-response') ? 'cf-turnstile-response' : 'g-recaptcha-response');
-                        element.style.display = 'none';
-                        document.body.appendChild(element);
-                    }
+                    const { element, created } = findOrCreateField(selector);
                     dispatchChange(element);
+                    injected.push({ selector, created });
                 });
+
+                const ensureRealXatField = () => {
+                    const realSelectors = [
+                        '#registercap input[name="cf-turnstile-response"]',
+                        '#registercap textarea[name="cf-turnstile-response"]',
+                        'form#regform input[name="cf-turnstile-response"]',
+                        'form#regform textarea[name="cf-turnstile-response"]'
+                    ];
+
+                    for (const selector of realSelectors) {
+                        const field = document.querySelector(selector);
+                        if (field && field.value && field.value.length > 30) {
+                            return true;
+                        }
+                    }
+
+                    const targetContainer = document.querySelector('#registercap') || document.querySelector('form#regform');
+                    if (!targetContainer) {
+                        return false;
+                    }
+
+                    let realField = targetContainer.querySelector('input[name="cf-turnstile-response"], textarea[name="cf-turnstile-response"]');
+                    if (!realField) {
+                        realField = document.createElement('input');
+                        realField.setAttribute('type', 'hidden');
+                        realField.setAttribute('name', 'cf-turnstile-response');
+                        realField.style.display = 'none';
+                        targetContainer.appendChild(realField);
+                    }
+                    dispatchChange(realField);
+                    return true;
+                };
+
+                if (!ensureRealXatField()) {
+                    console.log('[Playwright] Aviso: não foi possível injetar token em campo real do XAT');
+                }
 
                 const invokeCallback = (callbackName) => {
                     if (!callbackName) return false;
@@ -4499,33 +4622,85 @@ class XATBrowserAutomation:
             f"callbackFired={callback_stats.get('callbackFired')}"
         )
         
-        # Verificar se o token foi realmente injetado
+        # ✅ VERIFICAÇÃO CRÍTICA: Confirmar que o token foi injetado em campo REAL do XAT
+        logger.info("🔍 Verificando injeção de token em campos específicos do XAT...")
         try:
-            injected_token = await page.evaluate("""
+            injected_info = await page.evaluate("""
                 () => {
-                    const fields = [
-                        document.querySelector('input[name="cf-turnstile-response"]'),
-                        document.querySelector('textarea[name="cf-turnstile-response"]'),
-                        document.querySelector('input[name="g-recaptcha-response"]'),
-                        document.querySelector('textarea[name="g-recaptcha-response"]')
+                    // Campos específicos do XAT reCAPTCHA (em ordem de importância)
+                    const xat_fields = [
+                        { selector: '#registercap input[name="cf-turnstile-response"]', type: 'Cloudflare Turnstile (input, registercap)' },
+                        { selector: '#registercap textarea[name="cf-turnstile-response"]', type: 'Cloudflare Turnstile (textarea, registercap)' },
+                        { selector: '#registercap input[name="g-recaptcha-response"]', type: 'Google reCAPTCHA (input, registercap)' },
+                        { selector: '#registercap textarea[name="g-recaptcha-response"]', type: 'Google reCAPTCHA (textarea, registercap)' },
+                        { selector: 'form#regform input[name="cf-turnstile-response"]', type: 'Cloudflare Turnstile (input, regform)' },
+                        { selector: 'form#regform textarea[name="cf-turnstile-response"]', type: 'Cloudflare Turnstile (textarea, regform)' },
+                        { selector: 'form#regform input[name="g-recaptcha-response"]', type: 'Google reCAPTCHA (input, regform)' },
+                        { selector: 'form#regform textarea[name="g-recaptcha-response"]', type: 'Google reCAPTCHA (textarea, regform)' },
+                        { selector: 'input[name="cf-turnstile-response"]', type: 'Cloudflare Turnstile (input)' },
+                        { selector: 'textarea[name="cf-turnstile-response"]', type: 'Cloudflare Turnstile (textarea)' },
+                        { selector: 'input[name="g-recaptcha-response"]', type: 'Google reCAPTCHA (input)' },
+                        { selector: 'textarea[name="g-recaptcha-response"]', type: 'Google reCAPTCHA (textarea)' }
                     ];
-                    for (const field of fields) {
+                    
+                    const results = [];
+                    
+                    for (const fieldSpec of xat_fields) {
+                        const field = document.querySelector(fieldSpec.selector);
                         if (field && field.value && field.value.length > 30) {
-                            return {
-                                field: field.tagName + '[name="' + field.name + '"]',
-                                length: field.value.length,
-                                preview: field.value.substring(0, 40) + '...'
-                            };
+                            // Verificar se há um widget associado
+                            const hasWidget = !!document.querySelector('iframe[src*="challenges.cloudflare.com"], iframe[src*="turnstile"], iframe[src*="recaptcha"], [data-sitekey], .cf-turnstile, .g-recaptcha');
+                            
+                            results.push({
+                                selector: fieldSpec.selector,
+                                type: fieldSpec.type,
+                                found: true,
+                                tokenLength: field.value.length,
+                                preview: field.value.substring(0, 40) + '...',
+                                hasWidget: hasWidget,
+                                fieldVisible: field.offsetParent !== null,
+                                isInFrame: field.ownerDocument !== window.document ? 'SIM' : 'NÃO'
+                            });
+                        } else if (field) {
+                            results.push({
+                                selector: fieldSpec.selector,
+                                type: fieldSpec.type,
+                                found: true,
+                                tokenLength: field.value ? field.value.length : 0,
+                                hasWidget: false,
+                                fieldVisible: field.offsetParent !== null,
+                                note: 'Campo vazio ou token muito pequeno'
+                            });
                         }
                     }
-                    return null;
+                    
+                    return results;
                 }
             """)
             
-            if injected_token:
-                logger.info(f"✅ Token injetado em {injected_token['field']} ({injected_token['length']} chars): {injected_token['preview']}")
+            # Logar cada campo encontrado
+            if injected_info:
+                for field_info in injected_info:
+                    if field_info.get('found'):
+                        if field_info.get('tokenLength', 0) > 30 and field_info.get('hasWidget'):
+                            logger.info(
+                                f"✅ TOKEN INJETADO COM SUCESSO: "
+                                f"Campo=[{field_info['selector']}] | "
+                                f"Tipo=[{field_info['type']}] | "
+                                f"Tamanho=[{field_info['tokenLength']} chars] | "
+                                f"Widget Visível=[{'SIM' if field_info.get('hasWidget') else 'NÃO'}] | "
+                                f"Campo Visível=[{'SIM' if field_info.get('fieldVisible') else 'NÃO'}] | "
+                                f"Dentro de iframe=[{field_info.get('isInFrame', 'NÃO')}]"
+                            )
+                        else:
+                            logger.warning(
+                                f"⚠️ Campo encontrado mas INCOMPLETO: "
+                                f"Campo=[{field_info['selector']}] | "
+                                f"Tamanho=[{field_info.get('tokenLength', 0)} chars] | "
+                                f"Nota=[{field_info.get('note', 'N/A')}]"
+                            )
             else:
-                logger.warning("⚠️ Token não foi encontrado em nenhum campo após injeção!")
+                logger.warning("⚠️ Nenhum campo de captcha do XAT foi encontrado na página após injeção!")
                 
         except Exception as e:
             logger.debug(f"⚠️ Erro ao verificar injeção de token: {e}")
@@ -4540,8 +4715,34 @@ class XATBrowserAutomation:
 
     async def _inject_captcha_token_if_missing(self, page: Page) -> None:
         """Garante que o token de captcha está presente antes de submeter o formulário."""
-        token_field = await page.query_selector('textarea[name="cf-turnstile-response"], input[name="cf-turnstile-response"], textarea[name="g-recaptcha-response"], input[name="g-recaptcha-response"]')
-        if not token_field:
+        token_present = await page.evaluate(
+            """
+            () => {
+                const selectors = [
+                    '#registercap textarea[name="cf-turnstile-response"]',
+                    '#registercap input[name="cf-turnstile-response"]',
+                    '#registercap textarea[name="g-recaptcha-response"]',
+                    '#registercap input[name="g-recaptcha-response"]',
+                    'form#regform textarea[name="cf-turnstile-response"]',
+                    'form#regform input[name="cf-turnstile-response"]',
+                    'form#regform textarea[name="g-recaptcha-response"]',
+                    'form#regform input[name="g-recaptcha-response"]'
+                ];
+                return selectors.some(selector => {
+                    const field = document.querySelector(selector);
+                    return field && field.value && field.value.length > 30;
+                });
+            }
+            """
+        )
+
+        if not token_present:
+            # Garantir que o formulário de registro já contém o campo real antes de tentar resolver novamente
+            try:
+                await page.wait_for_selector('#registercap, form#regform', timeout=7000)
+            except Exception:
+                logger.debug('⚠️ registercap/form#regform não encontrado antes de injetar token faltante')
+
             sitekey = await self._extract_sitekey_from_full_page_content(page)
             if sitekey:
                 page_url = page.url
