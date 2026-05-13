@@ -1517,7 +1517,6 @@ class XATBrowserAutomation:
         if self.proxies:
             try:
                 self._select_first_paid_proxy()
-                self.session.headers['User-Agent'] = self.current_user_agent
                 logger.info(f"✅ Proxy inicial definido obrigatoriamente: {self.current_proxy}")
             except Exception as e:
                 logger.warning(f"⚠️ Falha ao definir proxy inicial: {e}")
@@ -2209,7 +2208,54 @@ class XATBrowserAutomation:
                             return
 
                 except Exception as ads_error:
-                    logger.warning(f"⚠️ AdsPower falhou ({ads_error}), fazendo fallback para Playwright normal")
+                    error_msg = str(ads_error)
+                    if "Connection refused" in error_msg:
+                        logger.warning(f"⚠️ AdsPower Connection refused, tentando retry em 3 segundos...")
+                        await asyncio.sleep(3)
+                        try:
+                            logger.info(f"🔌 Tentando AdsPower novamente após retry...")
+                            ws_endpoint = await asyncio.to_thread(
+                                self.ads_manager.start_browser,
+                                self.ads_power_profile_id,
+                                self.ads_power_profile_name
+                            )
+                            logger.info(f"✅ AdsPower retornou endpoint CDP após retry: {ws_endpoint}")
+                            self.ads_power_cdp_endpoint = ws_endpoint
+                            self.browser = await self.playwright.chromium.connect_over_cdp(ws_endpoint)
+                            self.context = self.browser.contexts[0] if self.browser.contexts else None
+
+                            if not self.context and self.browser:
+                                try:
+                                    self.context = await self.browser.new_context(proxy=proxy_config, user_agent=self.current_user_agent)
+                                except Exception as ctx_error:
+                                    logger.warning(f"⚠️ Falha ao criar novo contexto AdsPower: {ctx_error}")
+
+                            if self.context:
+                                try:
+                                    self.page = self.context.pages[0] if self.context.pages else await self.context.new_page()
+                                except Exception as page_error:
+                                    logger.warning(f"⚠️ Falha ao criar nova página no contexto AdsPower: {page_error}")
+                                    self.page = None
+                            else:
+                                self.page = None
+
+                            if not self.page and self.browser:
+                                try:
+                                    self.page = await self.browser.new_page()
+                                    self.context = self.page.context
+                                except Exception as page_error:
+                                    logger.warning(f"⚠️ Falha ao criar nova página direta no browser AdsPower: {page_error}")
+                                    raise
+
+                            if self.context:
+                                await self.context.add_init_script(self._get_stealth_init_script())
+                                await self.context.route('**/*', self._block_unnecessary_assets)
+                                logger.info("✅ AdsPower browser pronto para uso após retry")
+                                return
+                        except Exception as retry_error:
+                            logger.warning(f"⚠️ Retry AdsPower falhou ({retry_error}), fazendo fallback para Playwright normal")
+                    else:
+                        logger.warning(f"⚠️ AdsPower falhou ({ads_error}), fazendo fallback para Playwright normal")
                     self.use_ads_power = False  # Desabilita temporariamente para esta sessão
 
             # Fallback para Playwright normal
@@ -2299,8 +2345,8 @@ class XATBrowserAutomation:
         if sitekey in self.VALID_XAT_SITEKEYS:
             return True
 
-        # XAT pode mudar o sitekey do Turnstile dinamicamente com novos valores 0x4...
-        if re.match(r'^0x4[A-Za-z0-9_-]{20,32}$', sitekey):
+        # XAT usa sitekeys que começam com 0x4AAAAAAA
+        if re.match(r'^0x4AAAAAAA[A-Za-z0-9_-]{12,24}$', sitekey):
             logger.info(f"ℹ️ Aceitando sitekey XAT dinâmica: {sitekey}")
             return True
 
@@ -2799,15 +2845,68 @@ class XATBrowserAutomation:
             logger.error(f"❌ Erro ao obter user data: {e}")
             return None
 
-    async def _access_login_page(self, page: Page, user_id: str, k2_token: str) -> bool:
-        """Acessa página de login com parâmetros"""
+    async def _warm_up_cookies(self, page: Page) -> bool:
+        """Aquecimento de cookies: Navega para a página principal primeiro para bypass inicial do Cloudflare"""
         try:
-            logger.info(f"🔗 Acessando página de login com UserId: {user_id}")
+            logger.info("🔥 Iniciando aquecimento de cookies - navegando para https://xat.com/")
 
+            # Navegar para a página principal
+            home_timeout = self.config['browser_automation'].get('home_timeout', 90000)
+            response = await page.goto(self.BASE_URL, wait_until='domcontentloaded', timeout=home_timeout)
+
+            if response and response.status in [403, 503]:
+                logger.warning(f"⚠️ Bloqueio na página principal (status {response.status})")
+                self._blacklist_current_proxy("Bloqueio 403/503 na página principal")
+                return False
+
+            # Aguardar carregamento completo e possível desafio Cloudflare
+            await page.wait_for_load_state('networkidle', timeout=15000)
+
+            title = await page.title()
+            logger.info(f"🏠 Página principal carregada: {title}")
+
+            # Verificar se há desafio Cloudflare na página principal
+            if not title or 'just a moment' in title.lower() or 'checking your browser' in title.lower() or 'cloudflare' in title.lower():
+                logger.info("🛡️ Desafio Cloudflare detectado na página principal. Aguardando resolução...")
+                try:
+                    await page.wait_for_load_state('networkidle', timeout=20000)
+                    await page.wait_for_timeout(3000)  # Extra tempo para resolução
+                    title = await page.title()
+                    logger.info(f"✅ Desafio Cloudflare resolvido: {title}")
+                except Exception as e:
+                    logger.warning(f"⚠️ Timeout aguardando resolução do desafio Cloudflare: {e}")
+                    self._blacklist_current_proxy("Timeout no desafio Cloudflare da página principal")
+                    return False
+
+            # Simular interação humana na página principal
+            await self._simulate_mouse_movement(page)
+            await self._simulate_human_interaction(page)
+
+            # Aguardar um pouco para cookies serem estabelecidos
+            await page.wait_for_timeout(2000)
+
+            logger.info("✅ Aquecimento de cookies concluído - cookies estabelecidos para bypass Cloudflare")
+            return True
+
+        except Exception as e:
+            logger.error(f"❌ Erro no aquecimento de cookies: {e}")
+            return False
+
+    async def _access_login_page(self, page: Page, user_id: str, k2_token: str) -> bool:
+        """Acessa página de login com parâmetros - com aquecimento de cookies primeiro"""
+        try:
+            logger.info(f"🔗 Preparando acesso à página de login com UserId: {user_id}")
+
+            # 🔥 AQUECIMENTO DE COOKIES: Navegar para página principal primeiro
+            if not await self._warm_up_cookies(page):
+                logger.error("❌ Falha no aquecimento de cookies - abortando acesso ao login")
+                return False
+
+            # Agora navegar para a página de login
             login_url = f"{self.LOGIN_URL}?mode=1&UserId={user_id}&k2={k2_token}"
             await self._patch_turnstile_callbacks(page)
 
-            logger.info("🧍 Acessando /login diretamente para reduzir exposição a Cloudflare")
+            logger.info("🔗 Acessando /login após aquecimento de cookies")
             login_timeout = self.config['browser_automation'].get('login_timeout', 90000)
             try:
                 response = await page.goto(login_url, wait_until='domcontentloaded', timeout=login_timeout)
@@ -2817,7 +2916,7 @@ class XATBrowserAutomation:
                     logger.warning(f"⚠️ Timeout ao acessar login: {e}")
                     self.proxy_session_restart_pending = True
                     return False
-                logger.warning(f"⚠️ Falha ao acessar login diretamente: {e}")
+                logger.warning(f"⚠️ Falha ao acessar login: {e}")
                 return False
 
             # Pequena espera para DOM inicial e scripts básicos
@@ -2966,6 +3065,20 @@ class XATBrowserAutomation:
                     logger.info("✅ Widget Turnstile detectado via seletor")
                 except Exception as e:
                     logger.warning(f"⚠️ Widget Turnstile não detectado via seletor: {e}")
+                    
+                    # 🔍 DETECÇÃO ADICIONAL: Verificar se window.turnstile existe
+                    try:
+                        turnstile_exists = await page.evaluate("() => typeof window.turnstile !== 'undefined'")
+                        if not turnstile_exists:
+                            reason = "Página bloqueada antes do captcha carregar - window.turnstile não existe"
+                            logger.warning(f"🚫 {reason}")
+                            self.last_captcha_block_reason = reason
+                            self._blacklist_current_proxy(reason)
+                            return False
+                        else:
+                            logger.info("✅ Objeto window.turnstile encontrado apesar do seletor falhar")
+                    except Exception as eval_error:
+                        logger.debug(f"⚠️ Erro ao verificar window.turnstile: {eval_error}")
 
                 sitekey = await self._extract_sitekey_from_page(page)
                 if not sitekey:
@@ -4245,9 +4358,11 @@ class XATBrowserAutomation:
                     const scripts = Array.from(document.scripts || []);
                     for (const script of scripts) {
                         const text = script.textContent || '';
-                        const match = text.match(/(0x4AAAAAAA[A-Za-z0-9_-]{12,30})/);
-                        if (match) {
-                            return match[1];
+                        if (text.includes('cf-turnstile') || text.includes('turnstile')) {
+                            const match = text.match(/(0x4AAAAAAA[A-Za-z0-9_-]{12,30})/);
+                            if (match) {
+                                return match[1];
+                            }
                         }
                     }
 
@@ -4276,12 +4391,28 @@ class XATBrowserAutomation:
             return None
 
     def _extract_sitekey_from_html(self, html_content: str) -> Optional[str]:
-        """Extrai sitekey de conteúdo HTML usando regex e fallback em texto/bruto."""
+        """Extrai sitekey de conteúdo HTML usando regex e busca em scripts cf-turnstile."""
         try:
             if not html_content:
                 return None
 
             html_content = html.unescape(html_content)
+
+            # Primeiro, buscar em scripts cf-turnstile
+            soup = BeautifulSoup(html_content, 'html.parser')
+            scripts = soup.find_all('script')
+            for script in scripts:
+                script_text = script.get_text() or ''
+                if 'cf-turnstile' in script_text.lower() or 'turnstile' in script_text.lower():
+                    # Buscar por sitekey no conteúdo do script
+                    match = re.search(r'(0x4AAAAAAA[A-Za-z0-9_-]{12,30})', script_text)
+                    if match:
+                        sitekey = match.group(1)
+                        if self._is_allowed_sitekey(sitekey):
+                            logger.info(f"✅ Sitekey encontrada em script cf-turnstile: {sitekey}")
+                            return sitekey
+
+            # Fallback para regex no HTML geral
             patterns = [
                 r'data-sitekey=["\'](0x4AAAAAAA[A-Za-z0-9_-]{12,30})["\']',
                 r'data-cf-turnstile-sitekey=["\'](0x4AAAAAAA[A-Za-z0-9_-]{12,30})["\']',
@@ -4295,6 +4426,7 @@ class XATBrowserAutomation:
                 if match:
                     sitekey = match.group(1)
                     if self._is_allowed_sitekey(sitekey):
+                        logger.info(f"✅ Sitekey encontrada via regex no HTML: {sitekey}")
                         return sitekey
                     logger.warning(f"⚠️ Sitekey HTML não permitida detectada e ignorada: {sitekey}")
             return None
