@@ -22,6 +22,12 @@ Gerador automÃ¡tico de contas para **XAT.COM** com rotaÃ§Ã£o de proxies, t
 - Interações randômicas com mouse wheel
 - AdsPower CDP para bypass avançado
 - **User-Agent synchronization** com 2Captcha solver
+- **Canvas fingerprint noise** para evitar detecção
+- **WebGL fingerprint noise** para proteção avançada
+- **User-Agent Elite**: Chrome 124.0.0.0 para máxima compatibilidade
+- **CDP trace removal**: Remove rastros de Runtime.enable
+- **Referer spoofing**: Simula navegação orgânica do Google
+- **Real viewport**: 1920x1080 (resolução de monitor padrão)
 
 ## ðŸ“‹ Requisitos
 

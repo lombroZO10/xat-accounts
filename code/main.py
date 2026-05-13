@@ -1476,7 +1476,7 @@ class XATBrowserAutomation:
         self.current_proxy_base = None
         self.current_proxy = None
         self.proxy_session_id = None
-        self.force_user_agent = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36"
+        self.force_user_agent = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
         self.current_user_agent = self.force_user_agent
         self.proxy_session_restart_pending = False
         self.proxy_index = 0  # Índice para rastrear proxy atual
@@ -2264,7 +2264,7 @@ class XATBrowserAutomation:
                 args=browser_args
             )
 
-            viewport = random.choice(self.screen_resolutions)
+            viewport = {'width': 1920, 'height': 1080}  # Resolução padrão de monitor real
             self.context = await self.browser.new_context(
                 viewport=viewport,
                 device_scale_factor=1,
@@ -2315,25 +2315,215 @@ class XATBrowserAutomation:
         raise RuntimeError("Não foi possível criar ou obter uma página do navegador")
 
     def _get_stealth_init_script(self) -> str:
-        """Retorna um script de inicialização para reduzir detecção de automação."""
+        """Retorna um script de inicialização avançado para reduzir detecção de automação com Canvas/WebGL noise."""
         return """
         (() => {
+            'use strict';
+
+            // ==========================================
+            // CDP TRACE REMOVAL - Remove Runtime.enable traces
+            // ==========================================
+            try {
+                delete Object.getPrototypeOf(navigator).webdriver;
+            } catch (e) {}
+
+            // ==========================================
+            // ADVANCED STEALTH TECHNIQUES FOR CLOUDFLARE
+            // ==========================================
+
+            const randFloat = (min, max) => Math.random() * (max - min) + min;
+            const randInt = (min, max) => Math.floor(Math.random() * (max - min + 1)) + min;
+
+            // 1. BASIC WEBDRIVER BYPASS
             try {
                 Object.defineProperty(navigator, 'webdriver', {get: () => undefined});
             } catch (e) {}
+
+            // 2. LANGUAGE SPOOFING (EN-US for US IPs)
             try {
                 Object.defineProperty(navigator, 'languages', {
-                    get: () => ['pt-BR', 'pt', 'en-US', 'en']
+                    get: () => ['en-US', 'en', 'es', 'fr']
                 });
             } catch (e) {}
+
+            // 3. PLUGINS SPOOFING
             try {
+                const plugins = [
+                    {name: 'Chrome PDF Plugin', description: 'Portable Document Format', filename: 'internal-pdf-viewer'},
+                    {name: 'Chrome PDF Viewer', description: '', filename: 'mhjfbmdgcfjbbpaeojofohoefgiehjai'},
+                    {name: 'Native Client', description: '', filename: 'internal-nacl-plugin'}
+                ];
                 Object.defineProperty(navigator, 'plugins', {
-                    get: () => [{}, {}, {}, {}]
+                    get: () => plugins
                 });
             } catch (e) {}
+
+            // 4. CHROME RUNTIME SPOOFING
             try {
-                window.chrome = window.chrome || {runtime: {}};
+                window.chrome = window.chrome || {runtime: {onConnect: null, onMessage: null}};
             } catch (e) {}
+
+            // 5. CANVAS FINGERPRINT NOISE
+            try {
+                const originalGetImageData = CanvasRenderingContext2D.prototype.getImageData;
+                CanvasRenderingContext2D.prototype.getImageData = function(x, y, width, height) {
+                    const result = originalGetImageData.apply(this, [x, y, width, height]);
+                    const data = result.data;
+                    for (let i = 0; i < data.length; i += 4) {
+                        // Add subtle random noise to RGB channels
+                        data[i] = Math.min(255, Math.max(0, data[i] + randInt(-2, 2)));     // R
+                        data[i + 1] = Math.min(255, Math.max(0, data[i + 1] + randInt(-2, 2))); // G
+                        data[i + 2] = Math.min(255, Math.max(0, data[i + 2] + randInt(-2, 2))); // B
+                        // Alpha channel unchanged
+                    }
+                    return result;
+                };
+
+                // Override toDataURL for additional noise
+                const originalToDataURL = HTMLCanvasElement.prototype.toDataURL;
+                HTMLCanvasElement.prototype.toDataURL = function(...args) {
+                    // Add small random transformation before export
+                    const ctx = this.getContext('2d');
+                    if (ctx) {
+                        ctx.globalCompositeOperation = 'source-over';
+                        ctx.fillStyle = `rgba(${randInt(0, 255)}, ${randInt(0, 255)}, ${randInt(0, 255)}, 0.001)`;
+                        ctx.fillRect(randInt(0, this.width), randInt(0, this.height), 1, 1);
+                    }
+                    return originalToDataURL.apply(this, args);
+                };
+            } catch (e) {}
+
+            // 6. WEBGL FINGERPRINT NOISE
+            try {
+                const getParameter = WebGLRenderingContext.prototype.getParameter;
+                WebGLRenderingContext.prototype.getParameter = function(parameter) {
+                    const result = getParameter.call(this, parameter);
+
+                    // Add noise to WebGL parameters that are commonly fingerprinted
+                    switch (parameter) {
+                        case 37445: // UNMASKED_VENDOR_WEBGL
+                            return result + ' [' + randInt(1000, 9999) + ']';
+                        case 37446: // UNMASKED_RENDERER_WEBGL
+                            return result + ' [' + randInt(1000, 9999) + ']';
+                        case 7936: // VENDOR
+                        case 7937: // RENDERER
+                            return result + ' ' + randInt(1000, 9999);
+                        case 34076: // MAX_TEXTURE_SIZE
+                            return Math.max(4096, result - randInt(0, 512));
+                        case 3379: // MAX_VIEWPORT_DIMS
+                            return result.map ? result.map(x => x - randInt(0, 64)) : result;
+                        default:
+                            return result;
+                    }
+                };
+            } catch (e) {}
+
+            // 7. WEBRTC SPOOFING
+            try {
+                Object.defineProperty(navigator, 'mediaDevices', {
+                    get: () => ({
+                        enumerateDevices: () => Promise.resolve([
+                            {deviceId: 'default', kind: 'audioinput', label: 'Default - Microphone'},
+                            {deviceId: 'default', kind: 'audiooutput', label: 'Default - Speaker'}
+                        ])
+                    })
+                });
+            } catch (e) {}
+
+            // 8. PERMISSION QUERY SPOOFING
+            try {
+                const originalQuery = window.navigator.permissions.query;
+                window.navigator.permissions.query = (parameters) => (
+                    parameters.name === 'notifications' ?
+                        Promise.resolve({state: Notification.permission}) :
+                        originalQuery(parameters)
+                );
+            } catch (e) {}
+
+            // 9. SCREEN PROPERTIES NOISE
+            try {
+                Object.defineProperty(screen, 'availHeight', {
+                    get: () => screen.height - randInt(30, 50)
+                });
+                Object.defineProperty(screen, 'availWidth', {
+                    get: () => screen.width - randInt(0, 10)
+                });
+            } catch (e) {}
+
+            // 10. TIMING ATTACK PROTECTION
+            try {
+                const originalGetTime = Date.prototype.getTime;
+                Date.prototype.getTime = function() {
+                    return originalGetTime.call(this) + randInt(-10, 10);
+                };
+                const originalNow = Date.now;
+                Date.now = function() {
+                    return originalNow() + randInt(-10, 10);
+                };
+                const originalPerformanceNow = performance.now;
+                performance.now = function() {
+                    return originalPerformanceNow.call(this) + randFloat(-0.1, 0.1);
+                };
+            } catch (e) {}
+
+            // 11. BATTERY API SPOOFING
+            try {
+                navigator.getBattery = navigator.getBattery || (() => Promise.resolve({
+                    charging: true,
+                    chargingTime: Infinity,
+                    dischargingTime: Infinity,
+                    level: randFloat(0.7, 1.0)
+                }));
+            } catch (e) {}
+
+            // 12. MEMORY INFO SPOOFING
+            try {
+                if (!navigator.deviceMemory) {
+                    navigator.deviceMemory = randInt(4, 16);
+                }
+                if (!navigator.hardwareConcurrency) {
+                    navigator.hardwareConcurrency = randInt(4, 12);
+                }
+            } catch (e) {}
+
+            // 13. CONNECTION SPOOFING
+            try {
+                if (!navigator.connection) {
+                    navigator.connection = {
+                        effectiveType: '4g',
+                        rtt: randInt(50, 150),
+                        downlink: randFloat(5, 20)
+                    };
+                }
+            } catch (e) {}
+
+            // 14. GEOLOCATION SPOOFING (US-based)
+            try {
+                navigator.geolocation.getCurrentPosition = (success, error) => {
+                    if (success) {
+                        success({
+                            coords: {
+                                latitude: randFloat(25.0, 49.0),  // US latitude range
+                                longitude: randFloat(-125.0, -67.0), // US longitude range
+                                accuracy: randInt(10, 100)
+                            },
+                            timestamp: Date.now()
+                        });
+                    }
+                };
+            } catch (e) {}
+
+            // 15. AUDIO FINGERPRINT NOISE
+            try {
+                const originalCreateOscillator = AudioContext.prototype.createOscillator;
+                AudioContext.prototype.createOscillator = function() {
+                    const oscillator = originalCreateOscillator.call(this);
+                    oscillator.frequency.value += randFloat(-0.1, 0.1);
+                    return oscillator;
+                };
+            } catch (e) {}
+
+            console.log('[STEALTH] Advanced anti-detection techniques loaded');
         })();
         """
 
@@ -2852,7 +3042,12 @@ class XATBrowserAutomation:
 
             # Navegar para a página principal
             home_timeout = self.config['browser_automation'].get('home_timeout', 90000)
-            response = await page.goto(self.BASE_URL, wait_until='domcontentloaded', timeout=home_timeout)
+            response = await page.goto(
+                self.BASE_URL,
+                wait_until='domcontentloaded',
+                timeout=home_timeout,
+                headers={'Referer': 'https://www.google.com/'}
+            )
 
             if response and response.status in [403, 503]:
                 logger.warning(f"⚠️ Bloqueio na página principal (status {response.status})")
