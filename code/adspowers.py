@@ -116,6 +116,39 @@ class AdsPowerManager:
 
         return None
 
+    def _find_local_cdp_endpoint(self) -> Optional[str]:
+        """Try to discover an existing local Chrome/AdsPower CDP endpoint."""
+        for port in (9222, 9223, 9224):
+            url = f"http://127.0.0.1:{port}/json/version"
+            try:
+                response = self.session.get(url, timeout=5)
+                response.raise_for_status()
+                data = response.json()
+                ws_url = data.get('webSocketDebuggerUrl') or data.get('webSocketDebuggerUrl')
+                if isinstance(ws_url, str):
+                    logger.info(f"✅ Local Chrome CDP endpoint discovered on port {port}")
+                    return ws_url
+            except Exception:
+                continue
+
+        # Try the /json endpoint as a fallback
+        for port in (9222, 9223, 9224):
+            url = f"http://127.0.0.1:{port}/json"
+            try:
+                response = self.session.get(url, timeout=5)
+                response.raise_for_status()
+                data = response.json()
+                if isinstance(data, list) and data:
+                    first = data[0]
+                    ws_url = first.get('webSocketDebuggerUrl') or first.get('devtoolsFrontendUrl')
+                    if isinstance(ws_url, str):
+                        logger.info(f"✅ Local Chrome CDP endpoint discovered on port {port}")
+                        return ws_url
+            except Exception:
+                continue
+
+        return None
+
     def start_browser(
         self,
         profile_id: Optional[str] = None,
@@ -150,8 +183,13 @@ class AdsPowerManager:
                 last_error = str(exc)
                 logger.debug(f"AdsPower start_browser failed for {endpoint}: {last_error}")
 
+        logger.warning("⚠️ AdsPower API start endpoints failed; tentando fallback direto para CDP local...")
+        local_cdp = self._find_local_cdp_endpoint()
+        if local_cdp:
+            return local_cdp
+
         raise RuntimeError(
             "Unable to start the AdsPower browser. "
-            f"Check that AdsPower is running on port 50325 and that the local API endpoint is correct. "
+            f"Check that AdsPower is running on port 20725 or that the local CDP port (9222) is available. "
             f"Last error: {last_error}"
         )
