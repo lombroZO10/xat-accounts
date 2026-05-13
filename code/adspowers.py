@@ -13,8 +13,30 @@ class AdsPowerManager:
     """Manages communication with the local AdsPower API."""
 
     def __init__(self, api_url: str = "http://127.0.0.1:20725", api_key: Optional[str] = None):
-        self.api_url = api_url.rstrip('/')
+        # Try multiple common AdsPower ports
+        self.possible_ports = [20725, 50325, 50326, 20726, 8080, 3000]
+        self.api_key = api_key
         self.session = requests.Session()
+        self.api_url = None
+        
+        # Test which port works
+        for port in self.possible_ports:
+            test_url = f"http://127.0.0.1:{port}"
+            try:
+                # Quick test without auth first
+                response = self.session.get(f"{test_url}/api/v1/browser/start", timeout=2)
+                if response.status_code in [200, 401, 403]:  # 401/403 means endpoint exists but needs auth
+                    self.api_url = test_url
+                    logger.info(f"✅ AdsPower API found on port {port}")
+                    break
+            except:
+                continue
+        
+        if not self.api_url:
+            logger.warning(f"⚠️ AdsPower API not found on any port {self.possible_ports}. Using default: {api_url}")
+            self.api_url = api_url
+        
+        self.api_url = self.api_url.rstrip('/')
         self.headers: Dict[str, str] = {}
         if api_key:
             self.headers['Authorization'] = f'Bearer {api_key}'

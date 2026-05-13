@@ -215,7 +215,7 @@ DEFAULT_CONFIG = {
         "page_timeout": 90000,
         "home_timeout": 90000,  # Timeout para carregar página inicial (domcontentloaded)
         "login_timeout": 90000,  # Timeout para carregar página de login (networkidle)
-        "use_ads_power": True,
+        "use_ads_power": False,  # Temporarily disabled until AdsPower is running
         "ads_power_api_url": "http://127.0.0.1:20725",
         "ads_power_api_key": "64e06c1a51e916f82b06a71d921428f6008db5a025a70fb2",
         "ads_power_profile_id": "",
